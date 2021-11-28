@@ -24,6 +24,8 @@ apps:
             SCCACHE_IDLE_TIMEOUT: 0
         command: bin/sccache.wrapper
         daemon: simple
+        passthrough:
+            daemon-scope: user
 
 parts:
     sccache:

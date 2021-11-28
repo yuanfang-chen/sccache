@@ -51,6 +51,3 @@ done
 
 # Move the new config file
 mv -f ${CONFIG_FILE}.new $CONFIG_FILE || /bin/true
-
-# Restart the server to pick up new values
-systemctl restart snap.sccache.sccache-server.service
