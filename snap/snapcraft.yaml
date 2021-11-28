@@ -1,7 +1,7 @@
 name: sccache
-version: '0.2.2'
-version-script: |
-    git describe --tags
+base: core18
+type: app
+adopt-info: sccache
 
 summary: sccache is ccache with cloud storage
 description: |
@@ -38,6 +38,9 @@ parts:
         - gcs
         - redis
         - s3
+        override-pull: |
+            snapcraftctl pull
+            snapcraftctl set-version "$(git describe --tags)"
 
     wrapper:
         plugin: dump
