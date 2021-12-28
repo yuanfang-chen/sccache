@@ -49,10 +49,12 @@ impl CCompilerImpl for Clang {
         &self,
         arguments: &[OsString],
         cwd: &Path,
+        base_dir: Option<&PathBuf>,
     ) -> CompilerArguments<ParsedArguments> {
         gcc::parse_arguments(
             arguments,
             cwd,
+            base_dir,
             (&gcc::ARGS[..], &ARGS[..]),
             self.clangplusplus,
         )
@@ -149,7 +151,7 @@ mod test {
         Clang {
             clangplusplus: false,
         }
-        .parse_arguments(&arguments, &std::env::current_dir().unwrap())
+        .parse_arguments(&arguments, &std::env::current_dir().unwrap(), None)
     }
 
     macro_rules! parses {
@@ -376,12 +378,7 @@ mod test {
             "/a/x.yaml"
         );
         assert_eq!(
-            ovec![
-                "-Xclang",
-                "-ivfsoverlay",
-                "-Xclang",
-                "/a/x.yaml"
-            ],
+            ovec!["-Xclang", "-ivfsoverlay", "-Xclang", "/a/x.yaml"],
             a.preprocessor_args
         );
     }
@@ -417,6 +414,126 @@ mod test {
             ovec![std::env::current_dir().unwrap().join("list.txt")],
             a.extra_hash_files
         );
+    }
+
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn test_parse_fsanitize_blacklist_base_dir_success() {
+        let args = stringvec![
+            "-c",
+            "foo.c",
+            "-o",
+            "foo.o",
+            "-fsanitize-blacklist=/a/b/list.txt"
+        ];
+        let args = args.iter().map(OsString::from).collect::<Vec<_>>();
+        let ParsedArguments {
+            extra_hash_files,
+            common_args,
+            ..
+        } = match Clang.parse_arguments(
+            &args,
+            &PathBuf::from("/a"),
+            Some(PathBuf::from("/")).as_ref(),
+            #[cfg(feature = "dist-client")]
+            false,
+        ) {
+            CompilerArguments::Ok(args) => args,
+            o => panic!("Got unexpected parse result: {:?}", o),
+        };
+
+        assert_eq!(ovec!["-fsanitize-blacklist=b/list.txt"], common_args);
+        assert_eq!(ovec!["/a/b/list.txt"], extra_hash_files);
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_parse_fsanitize_blacklist_base_dir_success() {
+        let args = stringvec![
+            "-c",
+            "foo.c",
+            "-o",
+            "foo.o",
+            r"-fsanitize-blacklist=C:\a\b\list.txt"
+        ];
+        let args = args.iter().map(OsString::from).collect::<Vec<_>>();
+        let ParsedArguments {
+            extra_hash_files,
+            common_args,
+            ..
+        } = match Clang.parse_arguments(
+            &args,
+            &PathBuf::from(r"C:\a"),
+            Some(PathBuf::from(r"C:\")).as_ref(),
+            #[cfg(feature = "dist-client")]
+            false,
+        ) {
+            CompilerArguments::Ok(args) => args,
+            o => panic!("Got unexpected parse result: {:?}", o),
+        };
+
+        assert_eq!(ovec![r"-fsanitize-blacklist=b\list.txt"], common_args);
+        assert_eq!(ovec![r"C:\a\b\list.txt"], extra_hash_files);
+    }
+
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn test_parse_fsanitize_blacklist_base_dir_fail() {
+        let args = stringvec![
+            "-c",
+            "foo.c",
+            "-o",
+            "foo.o",
+            "-fsanitize-blacklist=/a/b/list.txt"
+        ];
+        let args = args.iter().map(OsString::from).collect::<Vec<_>>();
+        let ParsedArguments {
+            extra_hash_files,
+            common_args,
+            ..
+        } = match Clang.parse_arguments(
+            &args,
+            &PathBuf::from("/a"),
+            Some(PathBuf::from("/a/b/c")).as_ref(),
+            #[cfg(feature = "dist-client")]
+            false,
+        ) {
+            CompilerArguments::Ok(args) => args,
+            o => panic!("Got unexpected parse result: {:?}", o),
+        };
+
+        assert_eq!(ovec!["-fsanitize-blacklist=/a/b/list.txt"], common_args);
+        assert_eq!(ovec!["/a/b/list.txt"], extra_hash_files);
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_parse_fsanitize_blacklist_base_dir_fail() {
+        let args = stringvec![
+            "-c",
+            "foo.c",
+            "-o",
+            "foo.o",
+            r"-fsanitize-blacklist=C:\a\b\list.txt"
+        ];
+        let args = args.iter().map(OsString::from).collect::<Vec<_>>();
+        let ParsedArguments {
+            extra_hash_files,
+            common_args,
+            ..
+        } = match Clang.parse_arguments(
+            &args,
+            &PathBuf::from(r"C:\a"),
+            Some(PathBuf::from(r"C:\a\b\c")).as_ref(),
+            #[cfg(feature = "dist-client")]
+            false,
+        ) {
+            CompilerArguments::Ok(args) => args,
+            o => panic!("Got unexpected parse result: {:?}", o),
+        };
+
+        assert_eq!(ovec![r"-fsanitize-blacklist=C:\a\b\list.txt"], common_args);
+        assert_eq!(ovec![r"C:\a\b\list.txt"], extra_hash_files);
     }
 
     #[test]

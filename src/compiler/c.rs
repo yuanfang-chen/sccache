@@ -23,6 +23,7 @@ use crate::dist;
 use crate::dist::pkg;
 use crate::mock_command::CommandCreatorSync;
 use crate::util::{hash_all, Digest, HashToDigest};
+use pathdiff::diff_paths;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
@@ -172,6 +173,7 @@ pub trait CCompilerImpl: Clone + fmt::Debug + Send + Sync + 'static {
         &self,
         arguments: &[OsString],
         cwd: &Path,
+        base_dir: Option<&PathBuf>,
     ) -> CompilerArguments<ParsedArguments>;
     /// Run the C preprocessor with the specified set of arguments.
     #[allow(clippy::too_many_arguments)]
@@ -244,8 +246,12 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compiler<T> for CCompiler<I> {
         &self,
         arguments: &[OsString],
         cwd: &Path,
+        base_dir: Option<&PathBuf>,
     ) -> CompilerArguments<Box<dyn CompilerHasher<T> + 'static>> {
-        match self.compiler.parse_arguments(arguments, cwd) {
+        match self
+            .compiler
+            .parse_arguments(arguments, cwd, base_dir)
+        {
             CompilerArguments::Ok(args) => CompilerArguments::Ok(Box::new(CCompilerHasher {
                 parsed_args: args,
                 executable: self.executable.clone(),
@@ -453,6 +459,17 @@ impl<I: CCompilerImpl> Compilation for CCompilation<I> {
     }
 }
 
+pub fn make_relative_path(cwd: &Path, base_dir: Option<&PathBuf>, p: &Path) -> Option<OsString> {
+    if base_dir.is_none() {
+        return Some(p.into());
+    }
+    let base_dir = base_dir.unwrap();
+    if !p.starts_with(base_dir) {
+        return Some(p.into());
+    }
+    diff_paths(p, cwd).map(|x| x.into())
+}
+
 #[cfg(feature = "dist-client")]
 struct CInputsPackager {
     input_path: PathBuf,
@@ -633,7 +650,7 @@ impl pkg::ToolchainPackager for CToolchainPackager {
 }
 
 /// The cache is versioned by the inputs to `hash_key`.
-pub const CACHE_VERSION: &[u8] = b"10";
+pub const CACHE_VERSION: &[u8] = b"11";
 
 lazy_static! {
     /// Environment variables that are factored into the cache key.
@@ -649,6 +666,7 @@ lazy_static! {
 }
 
 /// Compute the hash key of `compiler` compiling `preprocessor_output` with `args`.
+// For C compilers, get hash key.
 pub fn hash_key(
     compiler_digest: &str,
     language: Language,

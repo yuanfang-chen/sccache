@@ -125,6 +125,7 @@ where
         &self,
         arguments: &[OsString],
         cwd: &Path,
+        base_dir: Option<&PathBuf>,
     ) -> CompilerArguments<Box<dyn CompilerHasher<T> + 'static>>;
     fn box_clone(&self) -> Box<dyn Compiler<T>>;
 }
@@ -242,6 +243,8 @@ where
                 Ok(Cache::Recache)
             } else {
                 storage.get(&key).await
+                // TODO: if not found, and there is a remote shared storage,
+                //       fetch from remote storage before doing the compilation.
             }
         };
 
@@ -332,6 +335,8 @@ where
                 )
                 .await?;
                 let duration = start.elapsed();
+                // TODO: better scheduling with duration information. Avoid slow
+                //       remote machine.
                 if !compiler_result.status.success() {
                     debug!(
                         "[{}]: Compiled but failed, not storing in cache",
@@ -713,6 +718,18 @@ macro_rules! try_or_cannot_cache {
             Err(e) => cannot_cache!($why, e.to_string()),
         }
     }};
+}
+
+macro_rules! try_string_arg {
+    ($e:expr) => {
+        match $e {
+            Ok(s) => s,
+            Err(e) => {
+                debug!("basedir transform fail: {}", e);
+                cannot_cache!("basedir transform fail");
+            }
+        }
+    };
 }
 
 /// Specifics about distributed compilation.
@@ -1347,7 +1364,7 @@ LLVM version: 6.0",
                     &creator,
                     Ok(MockChild::new(exit_status(0), "preprocessor output", "")),
                 );
-                let hasher = match c.parse_arguments(&arguments, ".".as_ref()) {
+                let hasher = match c.parse_arguments(&arguments, ".".as_ref(), None) {
                     CompilerArguments::Ok(h) => h,
                     o => panic!("Bad result from parse_arguments: {:?}", o),
                 };
@@ -1421,7 +1438,7 @@ LLVM version: 6.0",
         });
         let cwd = f.tempdir.path();
         let arguments = ovec!["-c", "foo.c", "-o", "foo.o"];
-        let hasher = match c.parse_arguments(&arguments, ".".as_ref()) {
+        let hasher = match c.parse_arguments(&arguments, ".".as_ref(), None) {
             CompilerArguments::Ok(h) => h,
             o => panic!("Bad result from parse_arguments: {:?}", o),
         };
@@ -1526,7 +1543,7 @@ LLVM version: 6.0",
         ));
         let cwd = f.tempdir.path();
         let arguments = ovec!["-c", "foo.c", "-o", "foo.o"];
-        let hasher = match c.parse_arguments(&arguments, ".".as_ref()) {
+        let hasher = match c.parse_arguments(&arguments, ".".as_ref(), None) {
             CompilerArguments::Ok(h) => h,
             o => panic!("Bad result from parse_arguments: {:?}", o),
         };
@@ -1637,7 +1654,7 @@ LLVM version: 6.0",
         });
         let cwd = f.tempdir.path();
         let arguments = ovec!["-c", "foo.c", "-o", "foo.o"];
-        let hasher = match c.parse_arguments(&arguments, ".".as_ref()) {
+        let hasher = match c.parse_arguments(&arguments, ".".as_ref(), None) {
             CompilerArguments::Ok(h) => h,
             o => panic!("Bad result from parse_arguments: {:?}", o),
         };
@@ -1718,7 +1735,7 @@ LLVM version: 6.0",
         }
         let cwd = f.tempdir.path();
         let arguments = ovec!["-c", "foo.c", "-o", "foo.o"];
-        let hasher = match c.parse_arguments(&arguments, ".".as_ref()) {
+        let hasher = match c.parse_arguments(&arguments, ".".as_ref(), None) {
             CompilerArguments::Ok(h) => h,
             o => panic!("Bad result from parse_arguments: {:?}", o),
         };
@@ -1823,7 +1840,7 @@ LLVM version: 6.0",
         );
         let cwd = f.tempdir.path();
         let arguments = ovec!["-c", "foo.c", "-o", "foo.o"];
-        let hasher = match c.parse_arguments(&arguments, ".".as_ref()) {
+        let hasher = match c.parse_arguments(&arguments, ".".as_ref(), None) {
             CompilerArguments::Ok(h) => h,
             o => panic!("Bad result from parse_arguments: {:?}", o),
         };
@@ -1907,7 +1924,7 @@ LLVM version: 6.0",
         }
         let cwd = f.tempdir.path();
         let arguments = ovec!["-c", "foo.c", "-o", "foo.o"];
-        let hasher = match c.parse_arguments(&arguments, ".".as_ref()) {
+        let hasher = match c.parse_arguments(&arguments, ".".as_ref(), None) {
             CompilerArguments::Ok(h) => h,
             o => panic!("Bad result from parse_arguments: {:?}", o),
         };

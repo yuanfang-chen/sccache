@@ -14,10 +14,12 @@
 // limitations under the License.
 
 use crate::compiler::args::{
-    ArgDisposition, ArgInfo, ArgToStringResult, ArgsIter, Argument, FromArg, IntoArg,
-    NormalizedDisposition, PathTransformerFn, SearchableArgInfo,
+    ArgDisposition, ArgInfo, ArgToOsStringResult, ArgToStringResult, ArgsIter, Argument, FromArg,
+    IntoArg, NormalizedDisposition, PathTransformerFn, PathTransformerOsFn, SearchableArgInfo,
 };
-use crate::compiler::c::{CCompilerImpl, CCompilerKind, Language, ParsedArguments};
+use crate::compiler::c::{
+    make_relative_path, CCompilerImpl, CCompilerKind, Language, ParsedArguments,
+};
 use crate::compiler::{Cacheable, ColorMode, CompileCommand, CompilerArguments};
 use crate::dist;
 use crate::errors::*;
@@ -46,8 +48,9 @@ impl CCompilerImpl for Diab {
         &self,
         arguments: &[OsString],
         cwd: &Path,
+        base_dir: Option<&PathBuf>,
     ) -> CompilerArguments<ParsedArguments> {
-        parse_arguments(arguments, cwd, &ARGS[..])
+        parse_arguments(arguments, cwd, base_dir, &ARGS[..])
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -151,6 +154,7 @@ counted_array!(pub static ARGS: [ArgInfo<ArgData>; _] = [
 pub fn parse_arguments<S>(
     arguments: &[OsString],
     cwd: &Path,
+    base_dir: Option<&PathBuf>,
     arg_info: S,
 ) -> CompilerArguments<ParsedArguments>
 where
@@ -164,11 +168,11 @@ where
     let mut output_arg = None;
     let mut preprocessor_args = vec![];
     let mut dependency_args = vec![];
+    let path_transformer_fn = &|p: &PathBuf| make_relative_path(cwd, base_dir, p);
 
     // Custom iterator to expand `@` arguments which stand for reading a file
     // and interpreting it as a list of more arguments.
     let it = ExpandAtArgs::new(cwd, arguments);
-
     for arg in ArgsIter::new(it, arg_info) {
         let arg = try_or_cannot_cache!(arg, "argument parse");
         // Check if the value part of this argument begins with '@'. If so, we either
@@ -179,7 +183,11 @@ where
             Argument::WithValue(_, ref v, ArgDisposition::Separated)
             | Argument::WithValue(_, ref v, ArgDisposition::CanBeConcatenated(_))
             | Argument::WithValue(_, ref v, ArgDisposition::CanBeSeparated(_)) => {
-                if v.clone().into_arg_os_string().starts_with("@") {
+                if v.clone()
+                    .into_arg_os_string(path_transformer_fn)
+                    .unwrap()
+                    .starts_with("@")
+                {
                     cannot_cache!("@");
                 }
             }
@@ -218,8 +226,12 @@ where
                 _ => unreachable!(),
             },
         }
+        let mut is_common_args = false;
         let args = match arg.get_data() {
-            Some(PassThrough(_)) => &mut common_args,
+            Some(PassThrough(_)) => {
+                is_common_args = true;
+                &mut common_args
+            }
             Some(DepArgument(_)) | Some(DepArgumentFlag) | Some(DepArgumentPath(_)) => {
                 &mut dependency_args
             }
@@ -230,7 +242,10 @@ where
             Some(TooHardFlag) | Some(TooHard(_)) => unreachable!(),
             None => match arg {
                 Argument::Raw(_) => continue,
-                Argument::UnknownFlag(_) => &mut common_args,
+                Argument::UnknownFlag(_) => {
+                    is_common_args = true;
+                    &mut common_args
+                }
                 _ => unreachable!(),
             },
         };
@@ -241,7 +256,15 @@ where
             Some(s) if s.len() == 2 => NormalizedDisposition::Concatenated,
             _ => NormalizedDisposition::Separated,
         };
-        args.extend(arg.normalize(norm).iter_os_strings());
+        if is_common_args {
+            for arg in arg.normalize(norm).iter_os_strings2(path_transformer_fn) {
+                args.push(try_string_arg!(arg))
+            }
+        } else {
+            for arg in arg.normalize(norm).iter_os_strings() {
+                args.push(arg)
+            }
+        }
     }
 
     // We only support compilation.
@@ -429,7 +452,7 @@ mod test {
 
     fn parse_arguments_(arguments: Vec<String>) -> CompilerArguments<ParsedArguments> {
         let args = arguments.iter().map(OsString::from).collect::<Vec<_>>();
-        parse_arguments(&args, ".".as_ref(), &ARGS[..])
+        parse_arguments(&args, ".".as_ref(), None, &ARGS[..])
     }
 
     #[test]

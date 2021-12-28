@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use crate::compiler::args::*;
-use crate::compiler::c::{CCompilerImpl, CCompilerKind, Language, ParsedArguments};
+use crate::compiler::c::{
+    make_relative_path, CCompilerImpl, CCompilerKind, Language, ParsedArguments,
+};
 use crate::compiler::{clang, Cacheable, ColorMode, CompileCommand, CompilerArguments};
 use crate::dist;
 use crate::mock_command::{CommandCreatorSync, RunCommand};
@@ -46,8 +48,9 @@ impl CCompilerImpl for Gcc {
         &self,
         arguments: &[OsString],
         cwd: &Path,
+        base_dir: Option<&PathBuf>,
     ) -> CompilerArguments<ParsedArguments> {
-        parse_arguments(arguments, cwd, &ARGS[..], self.gplusplus)
+        parse_arguments(arguments, cwd, base_dir, &ARGS[..], self.gplusplus)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -215,6 +218,7 @@ counted_array!(pub static ARGS: [ArgInfo<ArgData>; _] = [
 pub fn parse_arguments<S>(
     arguments: &[OsString],
     cwd: &Path,
+    base_dir: Option<&PathBuf>,
     arg_info: S,
     plusplus: bool,
 ) -> CompilerArguments<ParsedArguments>
@@ -240,11 +244,12 @@ where
     let mut xclangs: Vec<OsString> = vec![];
     let mut color_mode = ColorMode::Auto;
     let mut seen_arch = None;
+    let mut is_common_args;
+    let path_transformer_fn = &|p: &PathBuf| make_relative_path(cwd, base_dir, p);
 
     // Custom iterator to expand `@` arguments which stand for reading a file
     // and interpreting it as a list of more arguments.
     let it = ExpandIncludeFile::new(cwd, arguments);
-
     for arg in ArgsIter::new(it, arg_info) {
         let arg = try_or_cannot_cache!(arg, "argument parse");
         // Check if the value part of this argument begins with '@'. If so, we either
@@ -255,7 +260,11 @@ where
             Argument::WithValue(_, ref v, ArgDisposition::Separated)
             | Argument::WithValue(_, ref v, ArgDisposition::CanBeConcatenated(_))
             | Argument::WithValue(_, ref v, ArgDisposition::CanBeSeparated(_)) => {
-                if v.clone().into_arg_os_string().starts_with("@") {
+                if v.clone()
+                    .into_arg_os_string(path_transformer_fn)
+                    .unwrap()
+                    .starts_with("@")
+                {
                     cannot_cache!("@");
                 }
             }
@@ -334,6 +343,7 @@ where
                 _ => unreachable!(),
             },
         }
+        is_common_args = false;
         let args = match arg.get_data() {
             Some(SplitDwarf)
             | Some(ProfileGenerate)
@@ -344,9 +354,13 @@ where
             | Some(NoDiagnosticsColorFlag)
             | Some(Arch(_))
             | Some(PassThrough(_))
-            | Some(PassThroughPath(_)) => &mut common_args,
+            | Some(PassThroughPath(_)) => {
+                is_common_args = true;
+                &mut common_args
+            }
             Some(ExtraHashFile(path)) => {
                 extra_hash_files.push(cwd.join(path));
+                is_common_args = true;
                 &mut common_args
             }
             Some(PreprocessorArgumentFlag)
@@ -358,7 +372,10 @@ where
             Some(TooHardFlag) | Some(TooHard(_)) => unreachable!(),
             None => match arg {
                 Argument::Raw(_) => continue,
-                Argument::UnknownFlag(_) => &mut common_args,
+                Argument::UnknownFlag(_) => {
+                    is_common_args = true;
+                    &mut common_args
+                }
                 _ => unreachable!(),
             },
         };
@@ -370,12 +387,19 @@ where
             Some(s) if s.len() == 2 => NormalizedDisposition::Concatenated,
             _ => NormalizedDisposition::Separated,
         };
-        args.extend(arg.normalize(norm).iter_os_strings());
+        if is_common_args {
+            for arg in arg.normalize(norm).iter_os_strings2(path_transformer_fn) {
+                args.push(try_string_arg!(arg))
+            }
+        } else {
+            args.extend(arg.normalize(norm).iter_os_strings());
+        }
     }
 
     let xclang_it = ExpandIncludeFile::new(cwd, &xclangs);
     let mut follows_plugin_arg = false;
     for arg in ArgsIter::new(xclang_it, (&ARGS[..], &clang::ARGS[..])) {
+        is_common_args = false;
         let arg = try_or_cannot_cache!(arg, "argument parse");
         let args = match arg.get_data() {
             Some(SplitDwarf)
@@ -391,7 +415,10 @@ where
                 .flag_str()
                 .unwrap_or("Can't handle complex arguments through clang",)),
             None => match arg {
-                Argument::Raw(_) if follows_plugin_arg => &mut common_args,
+                Argument::Raw(_) if follows_plugin_arg => {
+                    is_common_args = true;
+                    &mut common_args
+                }
                 Argument::Raw(_) => cannot_cache!("Can't handle Raw arguments with -Xclang"),
                 Argument::UnknownFlag(_) => {
                     cannot_cache!("Can't handle UnknownFlag arguments with -Xclang")
@@ -403,9 +430,13 @@ where
             | Some(NoDiagnosticsColorFlag)
             | Some(Arch(_))
             | Some(PassThrough(_))
-            | Some(PassThroughPath(_)) => &mut common_args,
+            | Some(PassThroughPath(_)) => {
+                is_common_args = true;
+                &mut common_args
+            }
             Some(ExtraHashFile(path)) => {
                 extra_hash_files.push(cwd.join(path));
+                is_common_args = true;
                 &mut common_args
             }
             Some(PreprocessorArgumentFlag)
@@ -427,9 +458,16 @@ where
             Some(s) if s.len() == 2 => NormalizedDisposition::Concatenated,
             _ => NormalizedDisposition::Separated,
         };
-        for arg in arg.normalize(norm).iter_os_strings() {
-            args.push("-Xclang".into());
-            args.push(arg)
+        if is_common_args {
+            for arg in arg.normalize(norm).iter_os_strings2(path_transformer_fn) {
+                args.push("-Xclang".into());
+                args.push(try_string_arg!(arg));
+            }
+        } else {
+            for arg in arg.normalize(norm).iter_os_strings() {
+                args.push("-Xclang".into());
+                args.push(arg);
+            }
         }
     }
 
@@ -745,7 +783,7 @@ mod test {
         plusplus: bool,
     ) -> CompilerArguments<ParsedArguments> {
         let args = arguments.iter().map(OsString::from).collect::<Vec<_>>();
-        parse_arguments(&args, ".".as_ref(), &ARGS[..], plusplus)
+        parse_arguments(&args, ".".as_ref(), None, &ARGS[..], plusplus)
     }
 
     #[test]

@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use crate::compiler::args::*;
-use crate::compiler::c::{CCompilerImpl, CCompilerKind, Language, ParsedArguments};
+use crate::compiler::c::{
+    make_relative_path, CCompilerImpl, CCompilerKind, Language, ParsedArguments,
+};
 use crate::compiler::{
     clang, gcc, write_temp_file, Cacheable, ColorMode, CompileCommand, CompilerArguments,
 };
@@ -53,8 +55,9 @@ impl CCompilerImpl for Msvc {
         &self,
         arguments: &[OsString],
         cwd: &Path,
+        base_dir: Option<&PathBuf>,
     ) -> CompilerArguments<ParsedArguments> {
-        parse_arguments(arguments, cwd, self.is_clang)
+        parse_arguments(arguments, cwd, base_dir, self.is_clang)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -441,6 +444,7 @@ msvc_args!(static ARGS: [ArgInfo<ArgData>; _] = [
 pub fn parse_arguments(
     arguments: &[OsString],
     cwd: &Path,
+    base_dir: Option<&PathBuf>,
     is_clang: bool,
 ) -> CompilerArguments<ParsedArguments> {
     let mut output_arg = None;
@@ -458,6 +462,7 @@ pub fn parse_arguments(
     let mut xclangs: Vec<OsString> = vec![];
     let mut clangs: Vec<OsString> = vec![];
     let mut profile_generate = false;
+    let path_transformer_fn = &|p: &PathBuf| make_relative_path(cwd, base_dir, p);
 
     for arg in ArgsIter::new(arguments.iter().cloned(), (&ARGS[..], &SLASH_ARGS[..])) {
         let arg = try_or_cannot_cache!(arg, "argument parse");
@@ -521,21 +526,31 @@ pub fn parse_arguments(
             | Some(DebugInfo)
             | Some(PassThrough)
             | Some(PassThroughWithPath(_))
-            | Some(PassThroughWithSuffix(_)) => common_args.extend(
-                arg.normalize(NormalizedDisposition::Concatenated)
-                    .iter_os_strings(),
-            ),
+            | Some(PassThroughWithSuffix(_)) => {
+                for arg in arg
+                    .normalize(NormalizedDisposition::Concatenated)
+                    .iter_os_strings2(path_transformer_fn)
+                {
+                    common_args.push(try_string_arg!(arg))
+                }
+            }
             Some(ExtraHashFile(path)) => {
                 extra_hash_files.push(cwd.join(path));
-                common_args.extend(
-                    arg.normalize(NormalizedDisposition::Concatenated)
-                        .iter_os_strings(),
-                )
+                for arg in arg
+                    .normalize(NormalizedDisposition::Concatenated)
+                    .iter_os_strings2(path_transformer_fn)
+                {
+                    common_args.push(try_string_arg!(arg))
+                }
             }
-            Some(ExternalIncludePath(_)) => common_args.extend(
-                arg.normalize(NormalizedDisposition::Separated)
-                    .iter_os_strings(),
-            ),
+            Some(ExternalIncludePath(_)) => {
+                for arg in arg
+                    .normalize(NormalizedDisposition::Separated)
+                    .iter_os_strings2(path_transformer_fn)
+                {
+                    common_args.push(try_string_arg!(arg))
+                }
+            }
             // We ignore -MP and -FS and never pass them down to the compiler.
             //
             // -MP tells the compiler to build with multiple processes and is used
@@ -581,14 +596,18 @@ pub fn parse_arguments(
             let arg = try_or_cannot_cache!(arg, "argument parse");
             // Eagerly bail if it looks like we need to do more complicated work
             use crate::compiler::gcc::ArgData::*;
-            let mut args = match arg.get_data() {
+            let mut is_common_args = false;
+            let args = match arg.get_data() {
                 Some(SplitDwarf) | Some(TestCoverage) | Some(Coverage) | Some(DoCompilation)
                 | Some(Language(_)) | Some(Output(_)) | Some(TooHardFlag) | Some(XClang(_))
                 | Some(TooHard(_)) => cannot_cache!(arg
                     .flag_str()
                     .unwrap_or("Can't handle complex arguments through clang",)),
                 None => match arg {
-                    Argument::Raw(_) | Argument::UnknownFlag(_) => &mut common_args,
+                    Argument::Raw(_) | Argument::UnknownFlag(_) => {
+                        is_common_args = true;
+                        &mut common_args
+                    }
                     _ => unreachable!(),
                 },
                 Some(DiagnosticsColor(_))
@@ -596,14 +615,18 @@ pub fn parse_arguments(
                 | Some(NoDiagnosticsColorFlag)
                 | Some(Arch(_))
                 | Some(PassThrough(_))
-                | Some(PassThroughPath(_)) => &mut common_args,
-
+                | Some(PassThroughPath(_)) => {
+                    is_common_args = true;
+                    &mut common_args
+                }
                 Some(ProfileGenerate) => {
                     profile_generate = true;
+                    is_common_args = true;
                     &mut common_args
                 }
                 Some(ExtraHashFile(path)) => {
                     extra_hash_files.push(cwd.join(path));
+                    is_common_args = true;
                     &mut common_args
                 }
                 Some(PreprocessorArgumentFlag)
@@ -620,8 +643,14 @@ pub fn parse_arguments(
                 Some(s) if s.len() == 2 => NormalizedDisposition::Concatenated,
                 _ => NormalizedDisposition::Separated,
             };
-            for arg in arg.normalize(norm).iter_os_strings() {
-                append_fn(arg, &mut args);
+            if is_common_args {
+                for arg in arg.normalize(norm).iter_os_strings2(path_transformer_fn) {
+                    append_fn(try_string_arg!(arg), args);
+                }
+            } else {
+                for arg in arg.normalize(norm).iter_os_strings() {
+                    append_fn(arg, args);
+                }
             }
         }
     }
@@ -915,7 +944,7 @@ mod test {
     use crate::test::utils::*;
 
     fn parse_arguments(arguments: Vec<OsString>) -> CompilerArguments<ParsedArguments> {
-        super::parse_arguments(&arguments, &std::env::current_dir().unwrap(), false)
+        super::parse_arguments(&arguments, &std::env::current_dir().unwrap(), None, false)
     }
 
     #[test]
@@ -1112,12 +1141,7 @@ mod test {
         assert!(common_args.is_empty());
         assert_eq!(
             preprocessor_args,
-            ovec!(
-                "-Xclang",
-                "-ivfsoverlay",
-                "-Xclang",
-                "/a/x.yaml"
-            )
+            ovec!("-Xclang", "-ivfsoverlay", "-Xclang", "/a/x.yaml")
         );
     }
 
@@ -1146,7 +1170,16 @@ mod test {
 
     #[test]
     fn test_parse_arguments_values() {
-        let args = ovec!["-c", "foo.c", "-FI", "file", "-imsvc", "/a/b/c", "-Fofoo.obj", "/showIncludes"];
+        let args = ovec![
+            "-c",
+            "foo.c",
+            "-FI",
+            "file",
+            "-imsvc",
+            "/a/b/c",
+            "-Fofoo.obj",
+            "/showIncludes"
+        ];
         let ParsedArguments {
             input,
             language,

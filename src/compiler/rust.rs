@@ -475,6 +475,7 @@ where
         &self,
         arguments: &[OsString],
         cwd: &Path,
+        _base_dir: Option<&PathBuf>,
     ) -> CompilerArguments<Box<dyn CompilerHasher<T> + 'static>> {
         match parse_arguments(arguments, cwd) {
             CompilerArguments::Ok(args) => CompilerArguments::Ok(Box::new(RustHasher {
@@ -685,7 +686,7 @@ macro_rules! make_os_string {
         $(
             s.push($v);
         )*
-        s
+        Ok(s)
     }};
 }
 
@@ -718,7 +719,7 @@ impl FromArg for ArgCrateTypes {
     }
 }
 impl IntoArg for ArgCrateTypes {
-    fn into_arg_os_string(self) -> OsString {
+    fn into_arg_os_string(self, _transformer: PathTransformerOsFn<'_>) -> ArgToOsStringResult {
         let ArgCrateTypes {
             rlib,
             staticlib,
@@ -732,7 +733,7 @@ impl IntoArg for ArgCrateTypes {
             .collect();
         types.sort_unstable();
         let types_string = types.join(",");
-        types_string.into()
+        Ok(types_string.into())
     }
     fn into_arg_string(self, _transformer: PathTransformerFn<'_>) -> ArgToStringResult {
         let ArgCrateTypes {
@@ -768,7 +769,7 @@ impl FromArg for ArgLinkLibrary {
     }
 }
 impl IntoArg for ArgLinkLibrary {
-    fn into_arg_os_string(self) -> OsString {
+    fn into_arg_os_string(self, _transformer: PathTransformerOsFn<'_>) -> ArgToOsStringResult {
         let ArgLinkLibrary { kind, name } = self;
         make_os_string!(kind, "=", name)
     }
@@ -797,7 +798,7 @@ impl FromArg for ArgLinkPath {
     }
 }
 impl IntoArg for ArgLinkPath {
-    fn into_arg_os_string(self) -> OsString {
+    fn into_arg_os_string(self, _transformer: PathTransformerOsFn<'_>) -> ArgToOsStringResult {
         let ArgLinkPath { kind, path } = self;
         make_os_string!(kind, "=", path)
     }
@@ -819,7 +820,7 @@ impl FromArg for ArgCodegen {
     }
 }
 impl IntoArg for ArgCodegen {
-    fn into_arg_os_string(self) -> OsString {
+    fn into_arg_os_string(self, _transformer: PathTransformerOsFn<'_>) -> ArgToOsStringResult {
         let ArgCodegen { opt, value } = self;
         if let Some(value) = value {
             make_os_string!(opt, "=", value)
@@ -849,7 +850,7 @@ impl FromArg for ArgUnstable {
     }
 }
 impl IntoArg for ArgUnstable {
-    fn into_arg_os_string(self) -> OsString {
+    fn into_arg_os_string(self, _transformer: PathTransformerOsFn<'_>) -> ArgToOsStringResult {
         let ArgUnstable { opt, value } = self;
         if let Some(value) = value {
             make_os_string!(opt, "=", value)
@@ -885,7 +886,7 @@ impl FromArg for ArgExtern {
     }
 }
 impl IntoArg for ArgExtern {
-    fn into_arg_os_string(self) -> OsString {
+    fn into_arg_os_string(self, _transformer: PathTransformerOsFn<'_>) -> ArgToOsStringResult {
         let ArgExtern { name, path } = self;
         make_os_string!(name, "=", path)
     }
@@ -928,11 +929,11 @@ impl FromArg for ArgTarget {
     }
 }
 impl IntoArg for ArgTarget {
-    fn into_arg_os_string(self) -> OsString {
+    fn into_arg_os_string(self, _transformer: PathTransformerOsFn<'_>) -> ArgToOsStringResult {
         match self {
-            ArgTarget::Name(s) => s.into(),
-            ArgTarget::Path(p) => p.into(),
-            ArgTarget::Unsure(s) => s,
+            ArgTarget::Name(s) => Ok(s.into()),
+            ArgTarget::Path(p) => Ok(p.into()),
+            ArgTarget::Unsure(s) => Ok(s),
         }
     }
     fn into_arg_string(self, transformer: PathTransformerFn<'_>) -> ArgToStringResult {
@@ -1279,12 +1280,19 @@ where
         } = *self;
         trace!("[{}]: generate_hash_key", crate_name);
         // TODO: this doesn't produce correct arguments if they should be concatenated - should use iter_os_strings
+        let path_transformer = &mut |p: &PathBuf| Some(p.into());
         let os_string_arguments: Vec<(OsString, Option<OsString>)> = arguments
             .iter()
             .map(|arg| {
                 (
                     arg.to_os_string(),
-                    arg.get_data().cloned().map(IntoArg::into_arg_os_string),
+                    match arg.get_data() {
+                        Some(v) => match v.clone().into_arg_os_string(path_transformer) {
+                            Ok(v) => Some(v),
+                            Err(_) => None,
+                        },
+                        None => None,
+                    },
                 )
             })
             .collect();
@@ -1342,11 +1350,11 @@ where
         }
         let weak_toolchain_key = m.clone().finish();
         // 3. The full commandline (self.arguments)
-        // TODO: there will be full paths here, it would be nice to
-        // normalize them so we can get cross-machine cache hits.
         // A few argument types are not passed in a deterministic order
         // by cargo: --extern, -L, --cfg. We'll filter those out, sort them,
         // and append them to the rest of the arguments.
+
+        // TODO: use arguments, do prefix transform and then perform below.
         let args = {
             let (mut sortables, rest): (Vec<_>, Vec<_>) = os_string_arguments
                 .iter()

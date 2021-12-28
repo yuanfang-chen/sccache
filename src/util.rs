@@ -474,6 +474,8 @@ pub fn daemonize() -> Result<()> {
     match env::var("SCCACHE_NO_DAEMON") {
         Ok(ref val) if val == "1" => {}
         _ => {
+            // FIXME: this does not work when sccache is launched by, say, a
+            //        python script.
             Daemonize::new().start().context("failed to daemonize")?;
         }
     }

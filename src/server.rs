@@ -90,7 +90,7 @@ pub enum ServerStartup {
 /// Get the time the server should idle for before shutting down.
 fn get_idle_timeout() -> u64 {
     // A value of 0 disables idle shutdown entirely.
-    env::var("SCCACHE_IDLE_TIMEOUT")
+    env::var("SCCACHE_IDLE_TIMEOUT") // document this
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_IDLE_TIMEOUT)
@@ -1035,9 +1035,25 @@ where
             }
             Ok(c) => {
                 debug!("check_compiler: Supported compiler");
+                let base_dir = env_vars.iter().find(|(k, _)| k == "SCCACHE_BASEDIR");
+                let base_dir = match base_dir {
+                    Some((_k, v)) => {
+                        let p = PathBuf::from(v);
+                        #[cfg(target_os = "windows")]
+                        if p.components().count() < 2 {
+                            panic!("On Windows, SCCACHE_BASEDIR must be at least prefix+root such as C:\\, C: or C does not work");
+                        }
+                        if !p.is_absolute() {
+                            panic!("SCCACHE_BASEDIR must be an absolute path");
+                        }
+                        Some(p)
+                    }
+                    _ => None,
+                };
+
                 // Now check that we can handle this compiler with
                 // the provided commandline.
-                match c.parse_arguments(&cmd, &cwd) {
+                match c.parse_arguments(&cmd, &cwd, base_dir.as_ref()) {
                     CompilerArguments::Ok(hasher) => {
                         debug!("parse_arguments: Ok: {:?}", cmd);
                         stats.requests_executed += 1;
@@ -1168,6 +1184,8 @@ where
                             stats.compile_fails += 1;
                         }
                     };
+                    // TODO: implement ccache absolute_paths_in_stderr (CCACHE_ABSSTDERR)
+                    //       rewrite relative paths in stderr/stdout
                     let Output {
                         status,
                         stdout,
@@ -1235,7 +1253,8 @@ where
                             debug!("Error executing cache write: {}", e);
                             me.stats.write().await.cache_write_errors += 1;
                         }
-                        //TODO: save cache stats!
+                        //TODO: save cache stats! implement this to know cache
+                        //      write IO performance.
                         Ok(info) => {
                             debug!(
                                 "[{}]: Cache write finished in {}",

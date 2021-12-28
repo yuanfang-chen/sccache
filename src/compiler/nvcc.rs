@@ -47,8 +47,9 @@ impl CCompilerImpl for Nvcc {
         &self,
         arguments: &[OsString],
         cwd: &Path,
+        base_dir: Option<&PathBuf>,
     ) -> CompilerArguments<ParsedArguments> {
-        gcc::parse_arguments(arguments, cwd, (&gcc::ARGS[..], &ARGS[..]), false)
+        gcc::parse_arguments(arguments, cwd, base_dir, (&gcc::ARGS[..], &ARGS[..]), false)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -216,7 +217,7 @@ mod test {
 
     fn parse_arguments_(arguments: Vec<String>) -> CompilerArguments<ParsedArguments> {
         let arguments = arguments.iter().map(OsString::from).collect::<Vec<_>>();
-        Nvcc.parse_arguments(&arguments, ".".as_ref())
+        Nvcc.parse_arguments(&arguments, ".".as_ref(), None)
     }
 
     macro_rules! parses {
