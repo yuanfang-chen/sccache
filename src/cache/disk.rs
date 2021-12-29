@@ -38,10 +38,14 @@ impl DiskCache {
         max_size: u64,
         pool: &tokio::runtime::Handle,
     ) -> DiskCache {
+        let err_msg = format!(
+            "Couldn't instantiate disk cache! root is: {:?}",
+            root.as_ref()
+        );
         DiskCache {
             //TODO: change this function to return a Result
             lru: Arc::new(Mutex::new(
-                LruDiskCache::new(root, max_size).expect("Couldn't instantiate disk cache!"),
+                LruDiskCache::new(root, max_size).expect(&err_msg),
             )),
             pool: pool.clone(),
         }

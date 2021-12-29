@@ -243,7 +243,7 @@ impl CacheConfigs {
             .chain(gcs.map(CacheType::GCS))
             .chain(azure.map(CacheType::Azure))
             .collect();
-        let fallback = disk.unwrap_or_else(Default::default);
+        let fallback = disk.unwrap_or_default();
 
         (caches, fallback)
     }
@@ -524,6 +524,10 @@ fn config_from_env() -> EnvConfig {
     let disk_sz = env::var("SCCACHE_CACHE_SIZE")
         .ok()
         .and_then(|v| parse_size(&v));
+
+    if disk_dir.is_some() && !&disk_dir.as_ref().unwrap().is_absolute() {
+        warn!("SCCACHE_DIR must be an absolute path");
+    }
 
     let disk = if disk_dir.is_some() || disk_sz.is_some() {
         Some(DiskCacheConfig {
