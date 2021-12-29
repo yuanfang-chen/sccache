@@ -226,7 +226,7 @@ where
     S: SearchableArgInfo<ArgData>,
 {
     let mut output_arg = None;
-    let mut input_arg = None;
+    let mut input_args = vec![];
     let mut dep_target = None;
     let mut dep_flag = OsString::from("-MT");
     let mut common_args = vec![];
@@ -234,7 +234,6 @@ where
     let mut dependency_args = vec![];
     let mut extra_hash_files = vec![];
     let mut compilation = false;
-    let mut multiple_input = false;
     let mut split_dwarf = false;
     let mut need_explicit_dep_target = false;
     let mut language = None;
@@ -333,12 +332,7 @@ where
             }
             Some(XClang(s)) => xclangs.push(s.clone()),
             None => match arg {
-                Argument::Raw(ref val) => {
-                    if input_arg.is_some() {
-                        multiple_input = true;
-                    }
-                    input_arg = Some(val.clone());
-                }
+                Argument::Raw(ref val) => input_args.push(val.clone()),
                 Argument::UnknownFlag(_) => {}
                 _ => unreachable!(),
             },
@@ -476,17 +470,26 @@ where
         return CompilerArguments::NotCompilation;
     }
     // Can't cache compilations with multiple inputs.
-    if multiple_input {
+    if input_args.is_empty() {
+        cannot_cache!("no input file");
+    } else if input_args.len() > 1 {
+        let mut error_msg = OsString::new();
+        for (i, input_arg) in input_args.iter().enumerate() {
+            if i > 0 {
+                error_msg.push(", ");
+            }
+            error_msg.push(input_arg);
+        }
+        trace!(
+            "multiple input files or possibly unknown arguments: {:?}",
+            error_msg
+        );
         cannot_cache!("multiple input files");
     }
-    let input = match input_arg {
-        Some(i) => i,
-        // We can't cache compilation without an input.
-        None => cannot_cache!("no input file"),
-    };
+    let input = &input_args[0];
     let language = match language {
         None => {
-            let mut lang = Language::from_file_name(Path::new(&input));
+            let mut lang = Language::from_file_name(Path::new(input));
             if let (Some(Language::C), true) = (lang, plusplus) {
                 lang = Some(Language::Cxx);
             }
@@ -501,7 +504,7 @@ where
     let mut outputs = HashMap::new();
     let output = match output_arg {
         // We can't cache compilation that doesn't go to a file
-        None => PathBuf::from(Path::new(&input).with_extension("o").file_name().unwrap()),
+        None => PathBuf::from(Path::new(input).with_extension("o").file_name().unwrap()),
         Some(o) => o,
     };
     if split_dwarf {
