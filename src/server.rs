@@ -627,6 +627,7 @@ impl<C> CompilerCacheEntry<C> {
 }
 /// Service implementation for sccache
 #[derive(Clone)]
+#[allow(dead_code)]
 struct SccacheService<C>
 where
     C: Send,
@@ -1751,6 +1752,7 @@ struct WaitUntilZero {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 struct ActiveInfo {
     info: Arc<Mutex<Info>>,
 }

@@ -113,6 +113,7 @@ pub struct RustHasher {
 
 /// a lookup proxy for determining the actual compiler used per file or directory
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct RustupProxy {
     proxy_executable: PathBuf,
     filetime: FileTime,
