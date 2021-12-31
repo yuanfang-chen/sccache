@@ -1,4 +1,4 @@
-[![Build Status](https://github.com/mozilla/sccache/workflows/ci/badge.svg)](https://github.com/mozilla/sccache/actions?query=workflow%3Aci)
+[![Build Status](https://github.com/yuanfang-chen/sccache/workflows/ci/badge.svg)](https://github.com/yuanfang-chen/sccache/actions?query=workflow%3Aci)
 
 sccache - Shared Compilation Cache
 ==================================
