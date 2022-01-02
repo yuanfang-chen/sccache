@@ -391,6 +391,9 @@ fn run(command: Command) -> Result<i32> {
                 ),
             };
 
+            // FIXME: this is wrong. public_addr in the config file is not
+            //        necessarily the real IP address observed by other service.
+            //        Say if the server is behind VPN or server is in a container.
             let server_id = ServerId::new(public_addr);
             let scheduler_auth = match scheduler_auth {
                 server_config::SchedulerAuth::Insecure => {

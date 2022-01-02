@@ -703,7 +703,10 @@ mod server {
                             if server_id.addr().ip() != origin_ip {
                                 trace!("server ip: {:?}", server_id.addr().ip());
                                 trace!("request ip: {:?}", $request.remote_addr().ip());
-                                return make_401("invalid_bearer_token_mismatched_address");
+                                // return make_401("invalid_bearer_token_mismatched_address");
+                                let mut x = server_id.addr();
+                                x.set_ip(origin_ip);
+                                ServerId::new(x)
                             } else {
                                 server_id
                             }
