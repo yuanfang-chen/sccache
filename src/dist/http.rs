@@ -23,7 +23,7 @@ pub use self::server::{
 mod common {
     #[cfg(any(feature = "dist-client", feature = "dist-server"))]
     use hyperx::header;
-    #[cfg(feature = "dist-server")]
+    #[cfg(all(feature = "dist-server", not(feature = "dist-http")))]
     use std::collections::HashMap;
     use std::fmt;
 
@@ -128,6 +128,7 @@ mod common {
         Success {
             job_alloc: dist::JobAlloc,
             need_toolchain: bool,
+            #[cfg(not(feature = "dist-http"))]
             cert_digest: Vec<u8>,
         },
         Fail {
@@ -135,7 +136,7 @@ mod common {
         },
     }
     impl AllocJobHttpResponse {
-        #[cfg(feature = "dist-server")]
+        #[cfg(all(feature = "dist-server", not(feature = "dist-http")))]
         pub fn from_alloc_job_result(
             res: dist::AllocJobResult,
             certs: &HashMap<dist::ServerId, (Vec<u8>, Vec<u8>)>,
@@ -163,8 +164,22 @@ mod common {
                 dist::AllocJobResult::Fail { msg } => AllocJobHttpResponse::Fail { msg },
             }
         }
+        #[cfg(all(feature = "dist-server", feature = "dist-http"))]
+        pub fn from_alloc_job_result(res: dist::AllocJobResult) -> Self {
+            match res {
+                dist::AllocJobResult::Success {
+                    job_alloc,
+                    need_toolchain,
+                } => AllocJobHttpResponse::Success {
+                    job_alloc,
+                    need_toolchain,
+                },
+                dist::AllocJobResult::Fail { msg } => AllocJobHttpResponse::Fail { msg },
+            }
+        }
     }
 
+    #[cfg(not(feature = "dist-http"))]
     #[derive(Clone, Debug, Serialize, Deserialize)]
     #[serde(deny_unknown_fields)]
     pub struct ServerCertificateHttpResponse {
@@ -178,11 +193,14 @@ mod common {
         pub jwt_key: Vec<u8>,
         pub num_cpus: usize,
         pub server_nonce: dist::ServerNonce,
+        #[cfg(not(feature = "dist-http"))]
         pub cert_digest: Vec<u8>,
+        #[cfg(not(feature = "dist-http"))]
         pub cert_pem: Vec<u8>,
     }
     // cert_pem is quite long so elide it (you can retrieve it by hitting the server url anyway)
     impl fmt::Debug for HeartbeatServerHttpRequest {
+        #[cfg(not(feature = "dist-http"))]
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             let HeartbeatServerHttpRequest {
                 jwt_key,
@@ -192,6 +210,16 @@ mod common {
                 cert_pem,
             } = self;
             write!(f, "HeartbeatServerHttpRequest {{ jwt_key: {:?}, num_cpus: {:?}, server_nonce: {:?}, cert_digest: {:?}, cert_pem: [...{} bytes...] }}", jwt_key, num_cpus, server_nonce, cert_digest, cert_pem.len())
+        }
+
+        #[cfg(feature = "dist-http")]
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            let HeartbeatServerHttpRequest {
+                jwt_key,
+                num_cpus,
+                server_nonce,
+            } = self;
+            write!(f, "HeartbeatServerHttpRequest {{ jwt_key: {:?}, num_cpus: {:?}, server_nonce: {:?} }}", jwt_key, num_cpus, server_nonce)
         }
     }
     #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -210,6 +238,7 @@ pub mod urls {
             .join("/api/v1/scheduler/alloc_job")
             .expect("failed to create alloc job url")
     }
+    #[cfg(not(feature = "dist-http"))]
     pub fn scheduler_server_certificate(
         scheduler_url: &reqwest::Url,
         server_id: ServerId,
@@ -238,24 +267,40 @@ pub mod urls {
     }
 
     pub fn server_assign_job(server_id: ServerId, job_id: JobId) -> reqwest::Url {
+        #[cfg(not(feature = "dist-http"))]
+        let proto = "https";
+        #[cfg(feature = "dist-http")]
+        let proto = "http";
+
         let url = format!(
-            "https://{}/api/v1/distserver/assign_job/{}",
+            "{}://{}/api/v1/distserver/assign_job/{}",
+            proto,
             server_id.addr(),
             job_id
         );
         reqwest::Url::parse(&url).expect("failed to create assign job url")
     }
     pub fn server_submit_toolchain(server_id: ServerId, job_id: JobId) -> reqwest::Url {
+        #[cfg(not(feature = "dist-http"))]
+        let proto = "https";
+        #[cfg(feature = "dist-http")]
+        let proto = "http";
         let url = format!(
-            "https://{}/api/v1/distserver/submit_toolchain/{}",
+            "{}://{}/api/v1/distserver/submit_toolchain/{}",
+            proto,
             server_id.addr(),
             job_id
         );
         reqwest::Url::parse(&url).expect("failed to create submit toolchain url")
     }
     pub fn server_run_job(server_id: ServerId, job_id: JobId) -> reqwest::Url {
+        #[cfg(not(feature = "dist-http"))]
+        let proto = "https";
+        #[cfg(feature = "dist-http")]
+        let proto = "http";
         let url = format!(
-            "https://{}/api/v1/distserver/run_job/{}",
+            "{}://{}/api/v1/distserver/run_job/{}",
+            proto,
             server_id.addr(),
             job_id
         );
@@ -270,6 +315,7 @@ mod server {
     use flate2::read::ZlibDecoder as ZlibReadDecoder;
     use rand::{rngs::OsRng, RngCore};
     use rouille::accept;
+    #[cfg(not(feature = "dist-http"))]
     use std::collections::HashMap;
     use std::io::Read;
     use std::net::SocketAddr;
@@ -280,9 +326,11 @@ mod server {
     use std::time::Duration;
     use void::Void;
 
+    #[cfg(not(feature = "dist-http"))]
+    use super::common::ServerCertificateHttpResponse;
     use super::common::{
         bincode_req, AllocJobHttpResponse, HeartbeatServerHttpRequest, JobJwt,
-        ReqwestRequestBuilderExt, RunJobHttpRequest, ServerCertificateHttpResponse,
+        ReqwestRequestBuilderExt, RunJobHttpRequest,
     };
     use super::urls;
     use crate::dist::{
@@ -296,6 +344,7 @@ mod server {
     const HEARTBEAT_ERROR_INTERVAL: Duration = Duration::from_secs(10);
     pub const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(90);
 
+    #[cfg(not(feature = "dist-http"))]
     fn create_https_cert_and_privkey(addr: SocketAddr) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
         let rsa_key = openssl::rsa::Rsa::<openssl::pkey::Private>::generate(2048)
             .context("failed to generate rsa privkey")?;
@@ -716,6 +765,7 @@ mod server {
                 }};
             }
 
+            #[cfg(not(feature = "dist-http"))]
             fn maybe_update_certs(
                 client: &mut reqwest::blocking::Client,
                 certs: &mut HashMap<ServerId, (Vec<u8>, Vec<u8>)>,
@@ -756,6 +806,7 @@ mod server {
             info!("Scheduler listening for clients on {}", public_addr);
             let request_count = atomic::AtomicUsize::new(0);
             // From server_id -> cert_digest, cert_pem
+            #[cfg(not(feature = "dist-http"))]
             let server_certificates: Mutex<HashMap<ServerId, (Vec<u8>, Vec<u8>)>> =
                 Default::default();
 
@@ -779,26 +830,46 @@ mod server {
                         trace!("Req {}: alloc_job: {:?}", req_id, toolchain);
 
                         let alloc_job_res: AllocJobResult = try_or_500_log!(req_id, handler.handle_alloc_job(&requester, toolchain));
+                        #[cfg(not(feature = "dist-http"))]
                         let certs = server_certificates.lock().unwrap();
+                        #[cfg(not(feature = "dist-http"))]
                         let res = AllocJobHttpResponse::from_alloc_job_result(alloc_job_res, &certs);
+                        #[cfg(feature = "dist-http")]
+                        let res = AllocJobHttpResponse::from_alloc_job_result(alloc_job_res);
                         prepare_response(request, &res)
                     },
-                    (GET) (/api/v1/scheduler/server_certificate/{server_id: ServerId}) => {
+                    (GET) (/api/v1/scheduler/server_certificate/{_server_id: ServerId}) => {
+                        #[cfg(not(feature = "dist-http"))]
                         let certs = server_certificates.lock().unwrap();
-                        let (cert_digest, cert_pem) = try_or_500_log!(req_id, certs.get(&server_id)
+                        #[cfg(not(feature = "dist-http"))]
+                        let (cert_digest, cert_pem) = try_or_500_log!(req_id, certs.get(&_server_id)
                             .context("server cert not available"));
+                        #[cfg(not(feature = "dist-http"))]
                         let res = ServerCertificateHttpResponse {
                             cert_digest: cert_digest.clone(),
                             cert_pem: cert_pem.clone(),
                         };
-                        prepare_response(request, &res)
+                        #[cfg(not(feature = "dist-http"))]
+                        let res = prepare_response(request, &res);
+                        #[cfg(feature = "dist-http")]
+                        let res = make_401("unreachable");
+                        res
                     },
                     (POST) (/api/v1/scheduler/heartbeat_server) => {
                         let server_id = check_server_auth_or_err!(request);
                         let heartbeat_server = try_or_400_log!(req_id, bincode_input(request));
                         trace!("Req {}: heartbeat_server: {:?}", req_id, heartbeat_server);
 
-                        let HeartbeatServerHttpRequest { num_cpus, jwt_key, server_nonce, cert_digest, cert_pem } = heartbeat_server;
+                        let HeartbeatServerHttpRequest {
+                            num_cpus,
+                            jwt_key,
+                            server_nonce,
+                            #[cfg(not(feature = "dist-http"))]
+                            cert_digest,
+                            #[cfg(not(feature = "dist-http"))]
+                            cert_pem,
+                        } = heartbeat_server;
+                        #[cfg(not(feature = "dist-http"))]
                         try_or_500_log!(req_id, maybe_update_certs(
                             &mut requester.client.lock().unwrap(),
                             &mut server_certificates.lock().unwrap(),
@@ -869,8 +940,11 @@ mod server {
         scheduler_url: reqwest::Url,
         scheduler_auth: String,
         // HTTPS pieces all the builders will use for connection encryption
+        #[cfg(not(feature = "dist-http"))]
         cert_digest: Vec<u8>,
+        #[cfg(not(feature = "dist-http"))]
         cert_pem: Vec<u8>,
+        #[cfg(not(feature = "dist-http"))]
         privkey_pem: Vec<u8>,
         // Key used to sign any requests relating to jobs
         jwt_key: Vec<u8>,
@@ -886,6 +960,7 @@ mod server {
             scheduler_auth: String,
             handler: S,
         ) -> Result<Self> {
+            #[cfg(not(feature = "dist-http"))]
             let (cert_digest, cert_pem, privkey_pem) =
                 create_https_cert_and_privkey(public_addr)
                     .context("failed to create HTTPS certificate for server")?;
@@ -897,8 +972,11 @@ mod server {
                 public_addr,
                 scheduler_url,
                 scheduler_auth,
+                #[cfg(not(feature = "dist-http"))]
                 cert_digest,
+                #[cfg(not(feature = "dist-http"))]
                 cert_pem,
+                #[cfg(not(feature = "dist-http"))]
                 privkey_pem,
                 jwt_key,
                 server_nonce,
@@ -911,8 +989,11 @@ mod server {
                 public_addr,
                 scheduler_url,
                 scheduler_auth,
+                #[cfg(not(feature = "dist-http"))]
                 cert_digest,
+                #[cfg(not(feature = "dist-http"))]
                 cert_pem,
+                #[cfg(not(feature = "dist-http"))]
                 privkey_pem,
                 jwt_key,
                 server_nonce,
@@ -922,7 +1003,9 @@ mod server {
                 num_cpus: num_cpus::get(),
                 jwt_key: jwt_key.clone(),
                 server_nonce,
+                #[cfg(not(feature = "dist-http"))]
                 cert_digest,
+                #[cfg(not(feature = "dist-http"))]
                 cert_pem: cert_pem.clone(),
             };
             let job_authorizer = JWTJobAuthorizer::new(jwt_key);
@@ -961,54 +1044,69 @@ mod server {
             info!("Server listening for clients on {}", public_addr);
             let request_count = atomic::AtomicUsize::new(0);
 
-            let server = rouille::Server::new_ssl(public_addr, move |request| {
+            let the_handler = move |request: &rouille::Request| {
                 let req_id = request_count.fetch_add(1, atomic::Ordering::SeqCst);
                 trace!("Req {} ({}): {:?}", req_id, request.remote_addr(), request);
-                let response = (|| router!(request,
-                    (POST) (/api/v1/distserver/assign_job/{job_id: JobId}) => {
-                        job_auth_or_401!(request, &job_authorizer, job_id);
-                        let toolchain = try_or_400_log!(req_id, bincode_input(request));
-                        trace!("Req {}: assign_job({}): {:?}", req_id, job_id, toolchain);
+                let response = (|| {
+                    router!(request,
+                        (POST) (/api/v1/distserver/assign_job/{job_id: JobId}) => {
+                            job_auth_or_401!(request, &job_authorizer, job_id);
+                            let toolchain = try_or_400_log!(req_id, bincode_input(request));
+                            trace!("Req {}: assign_job({}): {:?}", req_id, job_id, toolchain);
 
-                        let res: AssignJobResult = try_or_500_log!(req_id, handler.handle_assign_job(job_id, toolchain));
-                        prepare_response(request, &res)
-                    },
-                    (POST) (/api/v1/distserver/submit_toolchain/{job_id: JobId}) => {
-                        job_auth_or_401!(request, &job_authorizer, job_id);
-                        trace!("Req {}: submit_toolchain({})", req_id, job_id);
+                            let res: AssignJobResult = try_or_500_log!(req_id, handler.handle_assign_job(job_id, toolchain));
+                            prepare_response(request, &res)
+                        },
+                        (POST) (/api/v1/distserver/submit_toolchain/{job_id: JobId}) => {
+                            job_auth_or_401!(request, &job_authorizer, job_id);
+                            trace!("Req {}: submit_toolchain({})", req_id, job_id);
 
-                        let body = request.data().expect("body was already read in submit_toolchain");
-                        let toolchain_rdr = ToolchainReader(Box::new(body));
-                        let res: SubmitToolchainResult = try_or_500_log!(req_id, handler.handle_submit_toolchain(&requester, job_id, toolchain_rdr));
-                        prepare_response(request, &res)
-                    },
-                    (POST) (/api/v1/distserver/run_job/{job_id: JobId}) => {
-                        job_auth_or_401!(request, &job_authorizer, job_id);
+                            let body = request.data().expect("body was already read in submit_toolchain");
+                            let toolchain_rdr = ToolchainReader(Box::new(body));
+                            let res: SubmitToolchainResult = try_or_500_log!(req_id, handler.handle_submit_toolchain(&requester, job_id, toolchain_rdr));
+                            prepare_response(request, &res)
+                        },
+                        (POST) (/api/v1/distserver/run_job/{job_id: JobId}) => {
+                            job_auth_or_401!(request, &job_authorizer, job_id);
 
-                        let mut body = request.data().expect("body was already read in run_job");
-                        let bincode_length = try_or_500_log!(req_id, body.read_u32::<BigEndian>()
-                            .context("failed to read run job input length")) as u64;
+                            let mut body = request.data().expect("body was already read in run_job");
+                            let bincode_length = try_or_500_log!(req_id, body.read_u32::<BigEndian>()
+                                .context("failed to read run job input length")) as u64;
 
-                        let mut bincode_reader = body.take(bincode_length);
-                        let runjob = try_or_500_log!(req_id, bincode::deserialize_from(&mut bincode_reader)
-                            .context("failed to deserialize run job request"));
-                        trace!("Req {}: run_job({}): {:?}", req_id, job_id, runjob);
-                        let RunJobHttpRequest { command, outputs } = runjob;
-                        let body = bincode_reader.into_inner();
-                        let inputs_rdr = InputsReader(Box::new(ZlibReadDecoder::new(body)));
-                        let outputs = outputs.into_iter().collect();
+                            let mut bincode_reader = body.take(bincode_length);
+                            let runjob = try_or_500_log!(req_id, bincode::deserialize_from(&mut bincode_reader)
+                                .context("failed to deserialize run job request"));
+                            trace!("Req {}: run_job({}): {:?}", req_id, job_id, runjob);
+                            let RunJobHttpRequest { command, outputs } = runjob;
+                            let body = bincode_reader.into_inner();
+                            let inputs_rdr = InputsReader(Box::new(ZlibReadDecoder::new(body)));
+                            let outputs = outputs.into_iter().collect();
 
-                        let res: RunJobResult = try_or_500_log!(req_id, handler.handle_run_job(&requester, job_id, command, outputs, inputs_rdr));
-                        prepare_response(request, &res)
-                    },
-                    _ => {
-                        warn!("Unknown request {:?}", request);
-                        rouille::Response::empty_404()
-                    },
-                ))();
+                            let res: RunJobResult = try_or_500_log!(req_id, handler.handle_run_job(&requester, job_id, command, outputs, inputs_rdr));
+                            prepare_response(request, &res)
+                        },
+                        _ => {
+                            warn!("Unknown request {:?}", request);
+                            rouille::Response::empty_404()
+                        },
+                    )
+                })();
                 trace!("Res {}: {:?}", req_id, response);
                 response
-            }, cert_pem, privkey_pem).map_err(|e| anyhow!(format!("Failed to start http server for sccache server: {}", e)))?;
+            };
+
+            #[cfg(not(feature = "dist-http"))]
+            let server_res =
+                rouille::Server::new_ssl(public_addr, the_handler, cert_pem, privkey_pem);
+            #[cfg(feature = "dist-http")]
+            let server_res = rouille::Server::new(public_addr, the_handler);
+
+            let server = server_res.map_err(|e| {
+                anyhow!(format!(
+                    "Failed to start http server for sccache server: {}",
+                    e
+                ))
+            })?;
 
             // This limit is rouille's default for `start_server_with_pool`, which
             // we would use, except that interface doesn't permit any sort of
@@ -1057,15 +1155,18 @@ mod client {
     use byteorder::{BigEndian, WriteBytesExt};
     use flate2::write::ZlibEncoder as ZlibWriteEncoder;
     use flate2::Compression;
+    #[cfg(not(feature = "dist-http"))]
     use std::collections::HashMap;
     use std::io::Write;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
+    #[cfg(not(feature = "dist-http"))]
+    use super::common::ServerCertificateHttpResponse;
     use super::common::{
         bincode_req, bincode_req_fut, AllocJobHttpResponse, ReqwestRequestBuilderExt,
-        RunJobHttpRequest, ServerCertificateHttpResponse,
+        RunJobHttpRequest,
     };
     use super::urls;
     use crate::errors::*;
@@ -1077,6 +1178,7 @@ mod client {
         auth_token: String,
         scheduler_url: reqwest::Url,
         // cert_digest -> cert_pem
+        #[cfg(not(feature = "dist-http"))]
         server_certs: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>>,
         // TODO: this should really only use the async client, but reqwest async bodies are extremely limited
         // and only support owned bytes, which means the whole toolchain would end up in memory
@@ -1115,6 +1217,7 @@ mod client {
             Ok(Self {
                 auth_token,
                 scheduler_url,
+                #[cfg(not(feature = "dist-http"))]
                 server_certs: Default::default(),
                 client: Arc::new(Mutex::new(client)),
                 client_async: Arc::new(Mutex::new(client_async)),
@@ -1124,6 +1227,7 @@ mod client {
             })
         }
 
+        #[cfg(not(feature = "dist-http"))]
         fn update_certs(
             client: &mut reqwest::blocking::Client,
             client_async: &mut reqwest::Client,
@@ -1170,6 +1274,7 @@ mod client {
 
     #[async_trait]
     impl dist::Client for Client {
+        #[cfg(not(feature = "dist-http"))]
         async fn do_alloc_job(&self, tc: Toolchain) -> Result<AllocJobResult> {
             let scheduler_url = self.scheduler_url.clone();
             let url = urls::scheduler_alloc_job(&scheduler_url);
@@ -1228,6 +1333,25 @@ mod client {
 
                     alloc_job_res
                 }
+                AllocJobHttpResponse::Fail { msg } => Ok(AllocJobResult::Fail { msg }),
+            }
+        }
+
+        #[cfg(feature = "dist-http")]
+        async fn do_alloc_job(&self, tc: Toolchain) -> Result<AllocJobResult> {
+            let scheduler_url = self.scheduler_url.clone();
+            let url = urls::scheduler_alloc_job(&scheduler_url);
+            let mut req = self.client_async.lock().unwrap().post(url);
+            req = req.bearer_auth(self.auth_token.clone()).bincode(&tc)?;
+
+            match bincode_req_fut(req).await? {
+                AllocJobHttpResponse::Success {
+                    job_alloc,
+                    need_toolchain,
+                } => Ok(AllocJobResult::Success {
+                    job_alloc,
+                    need_toolchain,
+                }),
                 AllocJobHttpResponse::Fail { msg } => Ok(AllocJobResult::Fail { msg }),
             }
         }

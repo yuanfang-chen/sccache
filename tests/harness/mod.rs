@@ -370,8 +370,13 @@ impl DistSystem {
             .unwrap();
         fs::File::create(format!("{}.ready", server_cfg_path.to_str().unwrap())).unwrap();
 
+        #[cfg(not(feature = "dist-http"))]
+        let proto = "https";
+        #[cfg(feature = "dist-http")]
+        let proto = "http";
+
         let url = HTTPUrl::from_url(
-            reqwest::Url::parse(&format!("https://{}:{}", server_ip, SERVER_PORT)).unwrap(),
+            reqwest::Url::parse(&format!("{}://{}:{}", proto, server_ip, SERVER_PORT)).unwrap(),
         );
         let handle = ServerHandle::Container {
             cid: server_name,
@@ -406,8 +411,14 @@ impl DistSystem {
             }
         };
 
-        let url =
-            HTTPUrl::from_url(reqwest::Url::parse(&format!("https://{}", server_addr)).unwrap());
+        #[cfg(not(feature = "dist-http"))]
+        let proto = "https";
+        #[cfg(feature = "dist-http")]
+        let proto = "http";
+
+        let url = HTTPUrl::from_url(
+            reqwest::Url::parse(&format!("{}://{}", proto, server_addr)).unwrap(),
+        );
         let handle = ServerHandle::Process { pid, url };
         self.wait_server_ready(&handle);
         handle

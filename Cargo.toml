@@ -132,6 +132,7 @@ unstable = []
 dist-client = ["ar", "flate2", "hyper", "hyperx", "reqwest", "url", "sha2"]
 # Enables the sccache-dist binary
 dist-server = ["crossbeam-utils", "jsonwebtoken", "flate2", "hyperx", "libmount", "nix", "openssl", "reqwest", "rouille", "syslog", "void", "version-compare"]
+dist-http = []
 # Enables dist tests with external requirements
 dist-tests = ["dist-client", "dist-server"]
 
