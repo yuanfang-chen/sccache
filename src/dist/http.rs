@@ -382,6 +382,9 @@ mod server {
             .context("failed to set pubkey for x509")?;
 
         let mut name = openssl::x509::X509Name::builder()?;
+        // FIXME: Use IP addr instead of domain name breaks container/WSL deployment.
+        // https://www.ssl.com/faqs/what-is-an-x-509-certificate/#ftoc-heading-2
+        // Use domain name here (pass in by env var like SCCACHE_SERVER_DOMAIN)
         name.append_entry_by_nid(openssl::nid::Nid::COMMONNAME, &addr.to_string())?;
         let name = name.build();
 

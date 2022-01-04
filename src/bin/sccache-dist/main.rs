@@ -401,6 +401,8 @@ fn run(command: Command) -> Result<i32> {
                     create_server_token(server_id, INSECURE_DIST_SERVER_TOKEN)
                 }
                 server_config::SchedulerAuth::Token { token } => {
+                    // TODO: use SCCACHE_SERVER_DOMAIN instead of IP addr directly
+                    //       otherwise it is hard to deploy with container/WSL.
                     create_server_token(server_id, &token)
                 }
                 server_config::SchedulerAuth::JwtToken { token } => {
