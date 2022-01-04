@@ -128,7 +128,7 @@ counted_array!(pub static ARGS: [ArgInfo<ArgData>; _] = [
     take_arg!("--sysroot", PathBuf, Separated, PassThroughPath),
     take_arg!("-A", OsString, Separated, PassThrough),
     take_arg!("-B", PathBuf, CanBeSeparated, PassThroughPath),
-    take_arg!("-D", OsString, CanBeSeparated, PassThrough),
+    take_arg!("-D", OsString, CanBeSeparated, PreprocessorArgument),
     flag!("-E", TooHardFlag),
     take_arg!("-F", PathBuf, CanBeSeparated, PreprocessorArgumentPath),
     take_arg!("-G", OsString, Separated, PassThrough),
@@ -143,7 +143,7 @@ counted_array!(pub static ARGS: [ArgInfo<ArgData>; _] = [
     take_arg!("-MQ", OsString, Separated, DepTarget),
     take_arg!("-MT", OsString, Separated, DepTarget),
     flag!("-P", TooHardFlag),
-    take_arg!("-U", OsString, CanBeSeparated, PassThrough),
+    take_arg!("-U", OsString, CanBeSeparated, PreprocessorArgument),
     take_arg!("-V", OsString, Separated, PassThrough),
     take_arg!("-Xassembler", OsString, Separated, PassThrough),
     take_arg!("-Xlinker", OsString, Separated, PassThrough),
@@ -1096,7 +1096,9 @@ mod test {
             "foo.o",
             "-MQ",
             "abc",
-            "-nostdinc"
+            "-nostdinc",
+            "-DNDEBUG",
+            "-UNDEBUG"
         ];
         let ParsedArguments {
             input,
@@ -1113,7 +1115,10 @@ mod test {
         assert_eq!(Some("foo.c"), input.to_str());
         assert_map_contains!(outputs, ("obj", PathBuf::from("foo.o")));
         assert_eq!(ovec!["-MF", "file"], dependency_args);
-        assert_eq!(ovec!["-nostdinc"], preprocessor_args);
+        assert_eq!(
+            ovec!["-nostdinc", "-DNDEBUG", "-UNDEBUG"],
+            preprocessor_args
+        );
         assert_eq!(ovec!["-fabc"], common_args);
         assert!(!msvc_show_includes);
     }
