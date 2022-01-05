@@ -14,20 +14,34 @@ sccache also provides [icecream](https://github.com/icecc/icecream)-style distri
 Table of Contents (ToC)
 ======================
 
-* [Installation](#installation)
-* [Build Requirements](#build-requirements)
-* [Build](#build)
-* [Usage](#usage)
-* [Storage Options](#storage-options)
-  * [Local](#local)
-  * [S3](#s3)
-  * [Redis](#redis)
-  * [Memcached](#memcached)
-  * [Google Cloud Storage](#google-cloud-storage)
-  * [Azure](#azure)
-* [Debugging](#debugging)
-* [Interaction with GNU `make` jobserver](#interaction-with-gnu-make-jobserver)
-* [Known Caveats](#known-caveats)
+- [sccache - Shared Compilation Cache](#sccache---shared-compilation-cache)
+- [Table of Contents (ToC)](#table-of-contents-toc)
+  - [Installation](#installation)
+    - [macOS](#macos)
+    - [Windows](#windows)
+    - [Via cargo](#via-cargo)
+  - [Usage](#usage)
+  - [Build Requirements](#build-requirements)
+  - [Build](#build)
+    - [Building portable binaries](#building-portable-binaries)
+      - [Linux](#linux)
+      - [macOS](#macos-1)
+      - [Windows](#windows-1)
+  - [Storage Options](#storage-options)
+    - [Local](#local)
+    - [S3](#s3)
+    - [Redis](#redis)
+    - [Memcached](#memcached)
+    - [Google Cloud Storage](#google-cloud-storage)
+    - [Azure](#azure)
+  - [Separating caches between invocations](#separating-caches-between-invocations)
+  - [Overwriting the cache](#overwriting-the-cache)
+  - [Debugging](#debugging)
+  - [Interaction with GNU `make` jobserver](#interaction-with-gnu-make-jobserver)
+  - [Known Caveats](#known-caveats)
+    - [General](#general)
+    - [Rust](#rust)
+    - [Symbolic links](#symbolic-links)
 
 ---
 
@@ -69,6 +83,19 @@ Running sccache is like running ccache: prefix your compilation commands with it
 
 ```bash
 sccache gcc -o foo.o -c foo.c
+```
+
+sccache reads configurations from `SCCACHE_CONF` and various environment variables
+that are prefixed with `SCCACHE_`. By default, `SCCACHE_CONF=~/.config/sccache/config`. For the same configuration, the environment variable takes precedenence
+over `SCCACHE_CONF`.
+
+```
+[cache]
+# Could be override by SCCACHE_DIR
+disk.dir = "/home/ychen2/Data/.sccache"
+# Could be override by SCCACHE_CACHE_SIZE
+# 50gb
+disk.size = 53687091200
 ```
 
 If you want to use sccache for caching Rust builds you can define `build.rustc-wrapper` in the
@@ -122,6 +149,8 @@ elseif(CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
   string(REPLACE "/Zi" "/Z7" CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_RELWITHDEBINFO}")
 endif()
 ```
+
+talk about clang-cl
 
 ---
 

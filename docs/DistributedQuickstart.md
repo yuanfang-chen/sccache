@@ -117,6 +117,7 @@ scheduler_url = "https://192.168.1.1"
 # this example where the client and build server are both Linux.
 toolchains = []
 # Size of the local toolchain cache, in bytes (5GB here, 10GB if unspecified).
+# Used when performing auto toolchain packaging.
 toolchain_cache_size = 5368709120
 
 [dist.auth]
@@ -194,6 +195,15 @@ binaries for Ubuntu 16.04](http://releases.llvm.org/download.html) and extract t
 package up the toolchain using the extracted `bin/clang` file (requires
 [PR #321](https://github.com/mozilla/sccache/pull/321)) and then insert `bin/clang-cl` at
 the appropriate path as a symlink to the `bin/clang` binary.
+
+Disable distribution
+-----------------------
+In your client config file, for each invoked compiler, add an entry like below.
+```
+[[dist.toolchains]]
+type = "no_dist"
+compiler_executable = "/home/me/.mozbuild/clang/bin/clang"
+```
 
 Considerations when distributing from macOS
 -------------------------------------------
