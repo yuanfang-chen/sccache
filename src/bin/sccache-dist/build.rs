@@ -335,6 +335,7 @@ impl OverlayBuilder {
                             .context("Failed to create an output directory")?;
                     }
 
+                    // TODO: use naked compilation for container/WSL
                     trace!("performing compile");
                     // Bubblewrap notes:
                     // - We're running as uid 0 (to do the mounts above), and so bubblewrap is run as uid 0
