@@ -221,12 +221,6 @@ mod test {
             ])
         );
         assert_eq!(
-            CompilerArguments::CannotCache("Can't handle UnknownFlag arguments with -Xclang", None),
-            parse_arguments_(stringvec![
-                "-c", "foo.c", "-o", "foo.o", "-Xclang", "-broken"
-            ])
-        );
-        assert_eq!(
             CompilerArguments::CannotCache(
                 "argument parse",
                 Some("Unexpected end of args".to_string())
@@ -381,6 +375,12 @@ mod test {
             ovec!["-Xclang", "-ivfsoverlay", "-Xclang", "/a/x.yaml"],
             a.preprocessor_args
         );
+    }
+
+    #[test]
+    fn test_parse_xclang_pass_through_unknown() {
+        let a = parses!("-c", "foo.c", "-o", "foo.o", "-Xclang", "-gcodeview");
+        assert_eq!(ovec!["-Xclang", "-gcodeview"], a.common_args);
     }
 
     #[test]

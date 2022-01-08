@@ -415,7 +415,8 @@ where
                 }
                 Argument::Raw(_) => cannot_cache!("Can't handle Raw arguments with -Xclang"),
                 Argument::UnknownFlag(_) => {
-                    cannot_cache!("Can't handle UnknownFlag arguments with -Xclang")
+                    is_common_args = true;
+                    &mut common_args
                 }
                 _ => unreachable!(),
             },
