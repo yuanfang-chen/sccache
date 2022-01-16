@@ -217,6 +217,7 @@ ArgData! {
     TooHardFlag,
     TooHard(OsString),
     TooHardPath(PathBuf),
+    PreprocessorArgumentFlag,
     PreprocessorArgument(OsString),
     PreprocessorArgumentPath(PathBuf),
     SuppressCompilation,
@@ -257,7 +258,7 @@ macro_rules! msvc_args {
 // https://docs.microsoft.com/en-us/cpp/build/reference/compiler-options-listed-alphabetically?view=vs-2019
 msvc_args!(static ARGS: [ArgInfo<ArgData>; _] = [
     msvc_flag!("?", SuppressCompilation),
-    msvc_flag!("C", PassThrough), // Ignored unless a preprocess-only flag is specified.
+    msvc_flag!("C", PreprocessorArgumentFlag),
     msvc_take_arg!("D", OsString, CanBeSeparated, PreprocessorArgument),
     msvc_flag!("E", SuppressCompilation),
     msvc_take_arg!("EH", OsString, Concatenated, PassThroughWithSuffix), // /EH[acsr\-]+ - TODO: use a regex?
@@ -331,6 +332,8 @@ msvc_args!(static ARGS: [ArgInfo<ArgData>; _] = [
     msvc_flag!("Oy", PassThrough),
     msvc_flag!("Oy-", PassThrough),
     msvc_flag!("P", SuppressCompilation),
+    // msvc_flag!("PD", <works for compilation only, not a proprocessor flag>),
+    msvc_flag!("PH", PreprocessorArgumentFlag),
     msvc_flag!("QIfist", PassThrough),
     msvc_flag!("QIntel-jcc-erratum", PassThrough),
     msvc_flag!("Qfast_transcendentals", PassThrough),
@@ -356,7 +359,7 @@ msvc_args!(static ARGS: [ArgInfo<ArgData>; _] = [
     msvc_flag!("WX", PassThrough),
     msvc_flag!("Wall", PassThrough),
     msvc_take_arg!("Wv:", OsString, Concatenated, PassThroughWithSuffix),
-    msvc_flag!("X", PassThrough),
+    msvc_flag!("X", PreprocessorArgumentFlag),
     msvc_take_arg!("Xclang", OsString, Separated, XClang),
     msvc_flag!("Yd", PassThrough),
     msvc_flag!("Z7", PassThrough), // Add debug info to .obj files.
@@ -414,7 +417,7 @@ msvc_args!(static ARGS: [ArgInfo<ArgData>; _] = [
     msvc_flag!("showIncludes", ShowIncludes),
     msvc_take_arg!("source-charset:", OsString, Concatenated, PassThroughWithSuffix),
     msvc_take_arg!("std:", OsString, Concatenated, PassThroughWithSuffix),
-    msvc_flag!("u", PassThrough),
+    msvc_flag!("u", PreprocessorArgumentFlag),
     msvc_flag!("utf-8", PassThrough),
     msvc_flag!("validate-charset", PassThrough),
     msvc_flag!("validate-charset-", PassThrough),
@@ -491,7 +494,8 @@ pub fn parse_arguments(
             Some(DepFile(p)) => depfile = Some(p.clone()),
             Some(ProgramDatabase(p)) => pdb = Some(p.clone()),
             Some(DebugInfo) => debug_info = true,
-            Some(PreprocessorArgument(_))
+            Some(PreprocessorArgumentFlag)
+            | Some(PreprocessorArgument(_))
             | Some(PreprocessorArgumentPath(_))
             | Some(ExtraHashFile(_))
             | Some(Ignore)
@@ -517,11 +521,12 @@ pub fn parse_arguments(
             }
         }
         match arg.get_data() {
-            Some(PreprocessorArgument(_)) | Some(PreprocessorArgumentPath(_)) => preprocessor_args
-                .extend(
-                    arg.normalize(NormalizedDisposition::Concatenated)
-                        .iter_os_strings(),
-                ),
+            Some(PreprocessorArgumentFlag)
+            | Some(PreprocessorArgument(_))
+            | Some(PreprocessorArgumentPath(_)) => preprocessor_args.extend(
+                arg.normalize(NormalizedDisposition::Concatenated)
+                    .iter_os_strings(),
+            ),
             Some(ProgramDatabase(_))
             | Some(DebugInfo)
             | Some(PassThrough)
@@ -996,6 +1001,27 @@ mod test {
         assert!(preprocessor_args.is_empty());
         assert!(common_args.is_empty());
         assert!(!msvc_show_includes);
+    }
+
+    #[test]
+    fn test_parse_preprocessor_flag() {
+        let args = ovec!["/C", "/PH", "/X", "/u", "/c", "foo.c"];
+        let ParsedArguments {
+            input,
+            language,
+            compilation_flag,
+            preprocessor_args,
+            common_args,
+            ..
+        } = match parse_arguments(args) {
+            CompilerArguments::Ok(args) => args,
+            o => panic!("Got unexpected parse result: {:?}", o),
+        };
+        assert_eq!(Some("foo.c"), input.to_str());
+        assert_eq!(Language::C, language);
+        assert_eq!(Some("/c"), compilation_flag.to_str());
+        assert_eq!(preprocessor_args, ovec!("/C", "/PH", "/X", "/u"));
+        assert!(common_args.is_empty());
     }
 
     #[test]
