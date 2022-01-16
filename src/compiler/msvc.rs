@@ -262,7 +262,7 @@ msvc_args!(static ARGS: [ArgInfo<ArgData>; _] = [
     msvc_flag!("E", SuppressCompilation),
     msvc_take_arg!("EH", OsString, Concatenated, PassThroughWithSuffix), // /EH[acsr\-]+ - TODO: use a regex?
     msvc_flag!("EP", SuppressCompilation),
-    msvc_take_arg!("F", OsString, Concatenated, PassThroughWithSuffix),
+    msvc_take_arg!("F", OsString, CanBeSeparated, PassThroughWithSuffix),
     msvc_take_arg!("FA", OsString, Concatenated, TooHard),
     msvc_flag!("FC", TooHardFlag), // Use absolute paths in error messages.
     msvc_take_arg!("FI", PathBuf, CanBeSeparated, PreprocessorArgumentPath),
@@ -302,7 +302,7 @@ msvc_args!(static ARGS: [ArgInfo<ArgData>; _] = [
     msvc_flag!("Gy", PassThrough),
     msvc_flag!("Gy-", PassThrough),
     msvc_flag!("Gz", PassThrough),
-    msvc_take_arg!("H", OsString, Concatenated, PassThroughWithSuffix),
+    msvc_take_arg!("H", OsString, CanBeSeparated, PassThroughWithSuffix),
     msvc_flag!("HELP", SuppressCompilation),
     msvc_take_arg!("I", PathBuf, CanBeSeparated, PreprocessorArgumentPath),
     msvc_flag!("J", PassThrough),
@@ -345,8 +345,8 @@ msvc_args!(static ARGS: [ArgInfo<ArgData>; _] = [
     msvc_take_arg!("RTC", OsString, Concatenated, PassThroughWithSuffix),
     msvc_flag!("TC", PassThrough), // TODO: disable explicit language check, hope for the best for now? Also, handle /Tc & /Tp.
     msvc_flag!("TP", PassThrough), // As above.
-    msvc_take_arg!("U", OsString, Concatenated, PreprocessorArgument),
-    msvc_take_arg!("V", OsString, Concatenated, PassThroughWithSuffix),
+    msvc_take_arg!("U", OsString, CanBeSeparated, PreprocessorArgument),
+    msvc_take_arg!("V", OsString, CanBeSeparated, PassThroughWithSuffix),
     msvc_flag!("W0", PassThrough),
     msvc_flag!("W1", PassThrough),
     msvc_flag!("W2", PassThrough),
