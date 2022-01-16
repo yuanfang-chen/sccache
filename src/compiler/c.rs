@@ -209,23 +209,11 @@ where
     pub async fn new(
         compiler: I,
         executable: PathBuf,
-        version: Option<String>,
-        pool: &tokio::runtime::Handle,
+        executable_digest: String,
     ) -> Result<CCompiler<I>> {
-        let digest = Digest::file(executable.clone(), pool).await?;
-
         Ok(CCompiler {
             executable,
-            executable_digest: {
-                if let Some(version) = version {
-                    let mut m = Digest::new();
-                    m.update(digest.as_bytes());
-                    m.update(version.as_bytes());
-                    m.finish()
-                } else {
-                    digest
-                }
-            },
+            executable_digest,
             compiler,
         })
     }
@@ -650,7 +638,7 @@ impl pkg::ToolchainPackager for CToolchainPackager {
 }
 
 /// The cache is versioned by the inputs to `hash_key`.
-pub const CACHE_VERSION: &[u8] = b"11";
+pub const CACHE_VERSION: &[u8] = b"12";
 
 lazy_static! {
     /// Environment variables that are factored into the cache key.

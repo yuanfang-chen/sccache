@@ -27,6 +27,7 @@ use crate::dist::pkg;
 use crate::lru_disk_cache;
 use crate::mock_command::{exit_status, CommandChild, CommandCreatorSync, RunCommand};
 use crate::util::{fmt_duration_as_secs, ref_env, run_input_output};
+use crate::util::{Digest, HashToDigest};
 use filetime::FileTime;
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -36,6 +37,7 @@ use std::fmt;
 use std::fs;
 use std::fs::File;
 use std::future::Future;
+use std::hash::Hash;
 use std::io::prelude::*;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -1031,6 +1033,7 @@ unknown
 __VERSION__
 "
     .to_vec();
+    // TODO: use pipe.
     let (tempdir, src) = write_temp_file(&pool, "testfile.c".as_ref(), test).await?;
 
     let mut cmd = creator.clone().new_command_sync(&executable);
@@ -1066,6 +1069,31 @@ __VERSION__
             // In case the compiler didn't expand the macro.
             .filter(|&line| line != "__VERSION__")
             .map(str::to_owned);
+
+        // This hash must generate different result for clang/clang++ or
+        // gcc/g++. See https://github.com/mozilla/sccache/pull/818.
+        let executable_digest = if let Some(version) = version {
+            // CCACHE_COMPILERCHECK=%compiler% -v
+            // executable version string + executable name.
+            let mut m = Digest::new();
+            m.update(version.as_bytes());
+            m.update(executable.to_string_lossy().as_bytes());
+            m.finish()
+        } else {
+            // CCACHE_COMPILERCHECK=mtime, ccache default
+            // mtime + size + executable name.
+            let mut m = Digest::new();
+            // metadata() will traverse symbolic links to query information
+            // about the destination file
+            let exe_md = executable.metadata()?;
+            exe_md
+                .modified()?
+                .hash(&mut HashToDigest { digest: &mut m });
+            m.update(&exe_md.len().to_ne_bytes());
+            m.update(executable.to_string_lossy().as_bytes());
+            m.finish()
+        };
+
         match kind {
             "clang" | "clang++" => {
                 debug!("Found {}", kind);
@@ -1074,15 +1102,14 @@ __VERSION__
                         clangplusplus: kind == "clang++",
                     },
                     executable,
-                    version,
-                    &pool,
+                    executable_digest,
                 )
                 .await
                 .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
             }
             "diab" => {
                 debug!("Found diab");
-                return CCompiler::new(Diab, executable, version, &pool)
+                return CCompiler::new(Diab, executable, executable_digest)
                     .await
                     .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
             }
@@ -1093,8 +1120,7 @@ __VERSION__
                         gplusplus: kind == "g++",
                     },
                     executable,
-                    version,
-                    &pool,
+                    executable_digest,
                 )
                 .await
                 .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
@@ -1118,15 +1144,14 @@ __VERSION__
                         is_clang,
                     },
                     executable,
-                    version,
-                    &pool,
+                    executable_digest,
                 )
                 .await
                 .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
             }
             "nvcc" => {
                 debug!("Found NVCC");
-                return CCompiler::new(Nvcc, executable, version, &pool)
+                return CCompiler::new(Nvcc, executable, executable_digest)
                     .await
                     .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
             }
@@ -1343,39 +1368,108 @@ LLVM version: 6.0",
         let pool = runtime.handle();
         let arguments = ovec!["-c", "foo.c", "-o", "foo.o"];
         let cwd = f.tempdir.path();
-
-        let results: Vec<_> = [11, 12]
-            .iter()
-            .map(|version| {
-                let output = format!("clang\n\"{}.0.0\"", version);
-                next_command(&creator, Ok(MockChild::new(exit_status(0), &output, "")));
-                let c = detect_compiler(
-                    creator.clone(),
-                    &f.bins[0],
-                    f.tempdir.path(),
-                    &[],
-                    pool,
-                    None,
-                )
+        let test = |(output, executable): &(&str, &PathBuf)| {
+            next_command(&creator, Ok(MockChild::new(exit_status(0), &output, "")));
+            let c = detect_compiler(
+                creator.clone(),
+                executable,
+                f.tempdir.path(),
+                &[],
+                pool,
+                None,
+            )
+            .wait()
+            .unwrap()
+            .0;
+            next_command(
+                &creator,
+                Ok(MockChild::new(exit_status(0), "preprocessor output", "")),
+            );
+            let hasher = match c.parse_arguments(&arguments, ".".as_ref(), None) {
+                CompilerArguments::Ok(h) => h,
+                o => panic!("Bad result from parse_arguments: {:?}", o),
+            };
+            hasher
+                .generate_hash_key(&creator, cwd.to_path_buf(), vec![], false, pool, false)
                 .wait()
                 .unwrap()
-                .0;
-                next_command(
-                    &creator,
-                    Ok(MockChild::new(exit_status(0), "preprocessor output", "")),
-                );
-                let hasher = match c.parse_arguments(&arguments, ".".as_ref(), None) {
-                    CompilerArguments::Ok(h) => h,
-                    o => panic!("Bad result from parse_arguments: {:?}", o),
-                };
-                hasher
-                    .generate_hash_key(&creator, cwd.to_path_buf(), vec![], false, pool, false)
-                    .wait()
-                    .unwrap()
-            })
-            .collect();
-        assert_eq!(results.len(), 2);
-        assert_ne!(results[0].key, results[1].key);
+                .key
+        };
+
+        let clang = f.mk_bin("clang").unwrap();
+        let clangpp = f.mk_bin("clang++").unwrap();
+        let gcc = f.mk_bin("gcc").unwrap();
+        let gpp = f.mk_bin("g++").unwrap();
+        let compilers = [
+            ("clang\n\"11.0.0\"", &clang),
+            ("clang\n\"12.0.0\"", &clang),
+            ("clang\n\"11.0.0\"", &clangpp),
+            ("gcc\n\"11.0.0\"", &gcc),
+            ("gcc\n\"11.1.0\"", &gcc),
+            ("gcc\n\"11.0.0\"", &gpp),
+        ];
+
+        // Check that elements in `compilers` have different hashes.
+        let mut results: Vec<String> = compilers.iter().map(test).collect();
+        assert_eq!(results.len(), 6);
+        results.sort();
+        for c in results.windows(2) {
+            assert_ne!(c[0], c[1]);
+        }
+
+        // If the compiler has version string, do not consider its mtime in
+        // hashing.
+        for (_, exe) in &compilers {
+            f.touch(exe.to_str().unwrap()).unwrap();
+        }
+        let mut results2: Vec<String> = compilers.iter().map(test).collect();
+        assert_eq!(results2.len(), 6);
+        results2.sort();
+        for (r1, r2) in results.iter().zip(results2.iter()) {
+            assert_eq!(r1, r2);
+        }
+
+        let mut compilers = [
+            ("clang\n__VERSION__", &clang),
+            ("clang\n__VERSION__", &clangpp),
+            ("gcc\n__VERSION__", &gcc),
+            ("gcc\n__VERSION__", &gpp),
+        ];
+
+        // Check that elements in `compilers` have different hashes due to
+        // having different executable name.
+        let results: Vec<String> = compilers.iter().map(test).collect();
+        assert_eq!(results.len(), 4);
+        let mut results2 = results.clone();
+        results2.sort();
+        for c in results2.windows(2) {
+            assert_ne!(c[0], c[1]);
+        }
+
+        // If the compiler has no version string, do consider its executable
+        // size in hashing.
+        // clang/gcc with a different executable size.
+        let clang2 = mk_bin_contents(cwd, "clang", |mut f| f.write_all(b"xx")).unwrap();
+        let gcc2 = mk_bin_contents(cwd, "gcc", |mut f| f.write_all(b"xx")).unwrap();
+        compilers[0].1 = &clang2;
+        compilers[2].1 = &gcc2;
+        let results2: Vec<String> = compilers.iter().map(test).collect();
+        assert_eq!(results2.len(), 4);
+        assert_ne!(results[0], results2[0]);
+        assert_eq!(results[1], results2[1]);
+        assert_ne!(results[2], results2[2]);
+        assert_eq!(results[3], results2[3]);
+
+        // If the compiler has no version string, do consider its mtime in
+        // hashing.
+        for (_, exe) in &compilers {
+            f.touch(exe.to_str().unwrap()).unwrap();
+        }
+        let results: Vec<String> = compilers.iter().map(test).collect();
+        assert_eq!(results.len(), 4);
+        for (r1, r2) in results.iter().zip(results2.iter()) {
+            assert_ne!(r1, r2);
+        }
     }
 
     #[test]
