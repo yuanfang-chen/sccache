@@ -651,6 +651,7 @@ where
     S: SearchableArgInfo<T>,
 {
     arguments: I,
+    first_chars: Vec<char>,
     arg_info: S,
     phantom: PhantomData<T>,
 }
@@ -663,11 +664,12 @@ where
 {
     /// Create an `Iterator` for parsed arguments, given an iterator of raw
     /// `OsString` arguments, and argument descriptions.
-    pub fn new(arguments: I, arg_info: S) -> Self {
+    pub fn new(arguments: I, first_chars: Vec<char>, arg_info: S) -> Self {
         #[cfg(debug_assertions)]
         debug_assert!(arg_info.check());
         ArgsIter {
             arguments,
+            first_chars,
             arg_info,
             phantom: PhantomData,
         }
@@ -688,7 +690,7 @@ where
             let arguments = &mut self.arguments;
             Some(match self.arg_info.search(&s[..]) {
                 Some(i) => i.clone().process(&s[..], || arguments.next()),
-                None => Ok(if s.starts_with('-') {
+                None => Ok(if self.first_chars.iter().any(|&x| s.starts_with(x)) {
                     Argument::UnknownFlag(arg.clone())
                 } else {
                     Argument::Raw(arg.clone())
@@ -1035,7 +1037,7 @@ mod tests {
             "-quxbar", // -quxbar is not -qux with a value of bar
             "-qux=value",
         ];
-        let iter = ArgsIter::new(args.iter().map(OsString::from), &ARGS[..]);
+        let iter = ArgsIter::new(args.iter().map(OsString::from), vec!['-'], &ARGS[..]);
         let expected = vec![
             arg!(UnknownFlag("-nomatch")),
             arg!(WithValue("-foo", ArgData::Foo("value"), Separated)),
@@ -1167,20 +1169,20 @@ mod tests {
         #[should_panic]
         fn test_args_iter_unsorted() {
             static ARGS: [ArgInfo<ArgData>; 2] = [flag!("-foo", FooFlag), flag!("-bar", FooFlag)];
-            ArgsIter::new(Vec::<OsString>::new().into_iter(), &ARGS[..]);
+            ArgsIter::new(Vec::<OsString>::new().into_iter(), vec!['-'], &ARGS[..]);
         }
 
         #[test]
         #[should_panic]
         fn test_args_iter_unsorted_2() {
             static ARGS: [ArgInfo<ArgData>; 2] = [flag!("-foo", FooFlag), flag!("-foo", FooFlag)];
-            ArgsIter::new(Vec::<OsString>::new().into_iter(), &ARGS[..]);
+            ArgsIter::new(Vec::<OsString>::new().into_iter(), vec!['-'], &ARGS[..]);
         }
 
         #[test]
         fn test_args_iter_no_conflict() {
             static ARGS: [ArgInfo<ArgData>; 2] = [flag!("-foo", FooFlag), flag!("-fooz", FooFlag)];
-            ArgsIter::new(Vec::<OsString>::new().into_iter(), &ARGS[..]);
+            ArgsIter::new(Vec::<OsString>::new().into_iter(), vec!['-'], &ARGS[..]);
         }
     }
 }

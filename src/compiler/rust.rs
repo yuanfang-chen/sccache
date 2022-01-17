@@ -1028,7 +1028,7 @@ fn parse_arguments(arguments: &[OsString], cwd: &Path) -> CompilerArguments<Pars
     let mut has_json = false;
     let mut profile = false;
 
-    for arg in ArgsIter::new(arguments.iter().cloned(), &ARGS[..]) {
+    for arg in ArgsIter::new(arguments.iter().cloned(), vec!['-'], &ARGS[..]) {
         let arg = try_or_cannot_cache!(arg, "argument parse");
         match arg.get_data() {
             Some(TooHardFlag) | Some(TooHard(_)) | Some(TooHardPath(_)) => {

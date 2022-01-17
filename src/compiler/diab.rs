@@ -173,7 +173,7 @@ where
     // Custom iterator to expand `@` arguments which stand for reading a file
     // and interpreting it as a list of more arguments.
     let it = ExpandAtArgs::new(cwd, arguments);
-    for arg in ArgsIter::new(it, arg_info) {
+    for arg in ArgsIter::new(it, vec!['-'], arg_info) {
         let arg = try_or_cannot_cache!(arg, "argument parse");
         // Check if the value part of this argument begins with '@'. If so, we either
         // failed to expand it, or it was a concatenated argument - either way, bail.
