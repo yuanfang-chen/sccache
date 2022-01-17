@@ -1051,10 +1051,21 @@ where
                     }
                     _ => None,
                 };
+                #[cfg(feature = "dist-client")]
+                let rewrite_includes_only = match self.dist_client.get_client() {
+                    Ok(Some(client)) => client.rewrite_includes_only(),
+                    _ => false,
+                };
 
                 // Now check that we can handle this compiler with
                 // the provided commandline.
-                match c.parse_arguments(&cmd, &cwd, base_dir.as_ref()) {
+                match c.parse_arguments(
+                    &cmd,
+                    &cwd,
+                    base_dir.as_ref(),
+                    #[cfg(feature = "dist-client")]
+                    rewrite_includes_only,
+                ) {
                     CompilerArguments::Ok(hasher) => {
                         debug!("parse_arguments: Ok: {:?}", cmd);
                         stats.requests_executed += 1;

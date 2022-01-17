@@ -13,9 +13,7 @@
 // limitations under the License.
 
 use crate::compiler::args::*;
-use crate::compiler::c::{
-    make_relative_path, CCompilerImpl, CCompilerKind, Language, ParsedArguments,
-};
+use crate::compiler::c::{make_relative_path, CCompilerImpl, CCompilerKind, ParsedArguments};
 use crate::compiler::{clang, Cacheable, ColorMode, CompileCommand, CompilerArguments};
 use crate::dist;
 use crate::mock_command::{CommandCreatorSync, RunCommand};
@@ -32,25 +30,30 @@ use crate::errors::*;
 
 /// A struct on which to implement `CCompilerImpl`.
 #[derive(Clone, Debug)]
-pub struct Gcc {
-    pub gplusplus: bool,
-}
+pub struct Gcc;
 
 #[async_trait]
 impl CCompilerImpl for Gcc {
     fn kind(&self) -> CCompilerKind {
         CCompilerKind::Gcc
     }
-    fn plusplus(&self) -> bool {
-        self.gplusplus
-    }
     fn parse_arguments(
         &self,
         arguments: &[OsString],
         cwd: &Path,
         base_dir: Option<&PathBuf>,
+        #[cfg(feature = "dist-client")] rewrite_includes_only: bool,
     ) -> CompilerArguments<ParsedArguments> {
-        parse_arguments(arguments, cwd, base_dir, &ARGS[..], self.gplusplus)
+        parse_arguments(
+            arguments,
+            cwd,
+            base_dir,
+            #[cfg(feature = "dist-client")]
+            rewrite_includes_only,
+            #[cfg(feature = "dist-client")]
+            self.kind(),
+            &ARGS[..],
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -62,22 +65,11 @@ impl CCompilerImpl for Gcc {
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
         may_dist: bool,
-        rewrite_includes_only: bool,
     ) -> Result<process::Output>
     where
         T: CommandCreatorSync,
     {
-        preprocess(
-            creator,
-            executable,
-            parsed_args,
-            cwd,
-            env_vars,
-            may_dist,
-            self.kind(),
-            rewrite_includes_only,
-        )
-        .await
+        preprocess(creator, executable, parsed_args, cwd, env_vars, may_dist).await
     }
 
     fn generate_compile_commands(
@@ -87,17 +79,8 @@ impl CCompilerImpl for Gcc {
         parsed_args: &ParsedArguments,
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
-        rewrite_includes_only: bool,
     ) -> Result<(CompileCommand, Option<dist::CompileCommand>, Cacheable)> {
-        generate_compile_commands(
-            path_transformer,
-            executable,
-            parsed_args,
-            cwd,
-            env_vars,
-            self.kind(),
-            rewrite_includes_only,
-        )
+        generate_compile_commands(path_transformer, executable, parsed_args, cwd, env_vars)
     }
 }
 
@@ -206,6 +189,29 @@ counted_array!(pub static ARGS: [ArgInfo<ArgData>; _] = [
     take_arg!("@", OsString, Concatenated, TooHard),
 ]);
 
+#[cfg(feature = "dist-client")]
+fn used_before_rewrite_includes(flag: Option<&'static str>, kind: &CCompilerKind) -> bool {
+    let flag = match flag {
+        Some(f) => f,
+        None => return false,
+    };
+    // let mut flags = vec![];
+    if *kind == CCompilerKind::Gcc {
+        // For "-fdirectives-only"
+        !vec!["-D", "-U"].contains(&flag)
+    // } else if *kind == CCompilerKind::Clang {
+    //     // For "-frewrite-includes"
+    //     if vec!["-include-pch", "-ivfsoverlay"].contains(&flag) {
+    //         false
+    //     } else {
+    //         // Assume all such kinds of flags are used for finding headers
+    //         is_preprocessor_path
+    //     }
+    } else {
+        false
+    }
+}
+
 /// Parse `arguments`, determining whether it is supported.
 ///
 /// If any of the entries in `arguments` result in a compilation that
@@ -219,8 +225,9 @@ pub fn parse_arguments<S>(
     arguments: &[OsString],
     cwd: &Path,
     base_dir: Option<&PathBuf>,
+    #[cfg(feature = "dist-client")] rewrite_includes_only: bool,
+    #[cfg(feature = "dist-client")] kind: CCompilerKind,
     arg_info: S,
-    plusplus: bool,
 ) -> CompilerArguments<ParsedArguments>
 where
     S: SearchableArgInfo<ArgData>,
@@ -236,7 +243,10 @@ where
     let mut compilation = false;
     let mut split_dwarf = false;
     let mut need_explicit_dep_target = false;
+    #[cfg(feature = "dist-client")]
     let mut language = None;
+    #[cfg(feature = "dist-client")]
+    let is_nvcc = kind == CCompilerKind::Nvcc;
     let mut compilation_flag = OsString::new();
     let mut profile_generate = false;
     let mut outputs_gcno = false;
@@ -313,16 +323,10 @@ where
             | Some(PreprocessorArgumentPath(_))
             | Some(PassThrough(_))
             | Some(PassThroughPath(_)) => {}
-            Some(Language(lang)) => {
-                language = match lang.to_string_lossy().as_ref() {
-                    "c" => Some(Language::C),
-                    "c++" => Some(Language::Cxx),
-                    "objective-c" => Some(Language::ObjectiveC),
-                    "objective-c++" => Some(Language::ObjectiveCxx),
-                    "cu" => Some(Language::Cuda),
-                    _ => cannot_cache!("-x"),
-                };
-            }
+            #[cfg(not(feature = "dist-client"))]
+            Some(Language(_)) => {}
+            #[cfg(feature = "dist-client")]
+            Some(Language(lang)) => language = Some(lang.clone()),
             Some(Arch(arch)) => {
                 match seen_arch {
                     Some(s) if &s != arch => cannot_cache!("multiple different -arch"),
@@ -359,10 +363,40 @@ where
             }
             Some(PreprocessorArgumentFlag)
             | Some(PreprocessorArgument(_))
-            | Some(PreprocessorArgumentPath(_)) => &mut preprocessor_args,
+            | Some(PreprocessorArgumentPath(_)) => {
+                #[cfg(not(feature = "dist-client"))]
+                let args = &mut preprocessor_args;
+                #[cfg(feature = "dist-client")]
+                let args = if rewrite_includes_only
+                    && !used_before_rewrite_includes(arg.flag_str(), &kind)
+                {
+                    is_common_args = true;
+                    &mut common_args
+                } else {
+                    &mut preprocessor_args
+                };
+                args
+            }
+            Some(Language(_)) => {
+                #[cfg(not(feature = "dist-client"))]
+                let args = {
+                    is_common_args = true;
+                    &mut common_args
+                };
+                #[cfg(feature = "dist-client")]
+                let args = if rewrite_includes_only || is_nvcc {
+                    is_common_args = true;
+                    &mut common_args
+                } else {
+                    // compilation flag would have "cpp-output" suffix
+                    &mut preprocessor_args
+                };
+                args
+            }
             Some(DepArgumentPath(_)) | Some(NeedDepTarget) => &mut dependency_args,
-            Some(DoCompilation) | Some(Language(_)) | Some(Output(_)) | Some(XClang(_))
-            | Some(DepTarget(_)) => continue,
+            Some(DoCompilation) | Some(Output(_)) | Some(XClang(_)) | Some(DepTarget(_)) => {
+                continue
+            }
             Some(TooHardFlag) | Some(TooHard(_)) => unreachable!(),
             None => match arg {
                 Argument::Raw(_) => continue,
@@ -436,7 +470,20 @@ where
             }
             Some(PreprocessorArgumentFlag)
             | Some(PreprocessorArgument(_))
-            | Some(PreprocessorArgumentPath(_)) => &mut preprocessor_args,
+            | Some(PreprocessorArgumentPath(_)) => {
+                #[cfg(not(feature = "dist-client"))]
+                let args = &mut preprocessor_args;
+                #[cfg(feature = "dist-client")]
+                let args = if rewrite_includes_only
+                    && !used_before_rewrite_includes(arg.flag_str(), &kind)
+                {
+                    is_common_args = true;
+                    &mut common_args
+                } else {
+                    &mut preprocessor_args
+                };
+                args
+            }
             Some(DepTarget(_)) | Some(DepArgumentPath(_)) | Some(NeedDepTarget) => {
                 &mut dependency_args
             }
@@ -488,20 +535,6 @@ where
         cannot_cache!("multiple input files");
     }
     let input = &input_args[0];
-    let language = match language {
-        None => {
-            let mut lang = Language::from_file_name(Path::new(input));
-            if let (Some(Language::C), true) = (lang, plusplus) {
-                lang = Some(Language::Cxx);
-            }
-            lang
-        }
-        l => l,
-    };
-    let language = match language {
-        Some(l) => l,
-        None => cannot_cache!("unknown source language"),
-    };
     let mut outputs = HashMap::new();
     let output = match output_arg {
         // We can't cache compilation that doesn't go to a file
@@ -523,9 +556,86 @@ where
     }
     outputs.insert("obj", output);
 
+    #[cfg(feature = "dist-client")]
+    if rewrite_includes_only {
+        // Move include related flags to common_args
+        match kind {
+            CCompilerKind::Clang => preprocessor_args.push("-frewrite-includes".into()),
+            CCompilerKind::Gcc => {
+                // From https://gcc.gnu.org/onlinedocs/gcc/Preprocessor-Options.html:
+                //
+                // -fdirectives-only
+                //
+                //     [...]
+                //
+                //     With -fpreprocessed, predefinition of command line and most
+                //     builtin macros is disabled. Macros such as __LINE__, which
+                //     are contextually dependent, are handled normally. This
+                //     enables compilation of files previously preprocessed with -E
+                //     -fdirectives-only.
+                //
+                // Which is exactly what we do :-)
+                common_args.push("-fdirectives-only".into());
+                compilation_flag.push(" -fpreprocessed");
+            }
+            _ => {}
+        }
+    }
+
+    #[cfg(feature = "dist-client")]
+    let dist_input: PathBuf = if rewrite_includes_only || is_nvcc {
+        // nvcc does not support `-x cu-cpp-output` or `.cui`
+        input.into()
+    } else {
+        match language {
+            // Use -x, no need change input file name.
+            Some(l) if l == "c" => {
+                compilation_flag.push(" -x cpp-output");
+                input.into()
+            }
+            Some(l) => {
+                compilation_flag.push(" -x ");
+                compilation_flag.push(l);
+                compilation_flag.push("-cpp-output");
+                input.into()
+            }
+            // No -x, change input file name to hint the compiler that the input is preprocessed.
+            None => {
+                lazy_static! {
+                    static ref MAP: HashMap<&'static str, &'static str> = [
+                        ("c", "i"),
+                        ("cc", "ii"),
+                        ("cp", "ii"),
+                        ("cxx", "ii"),
+                        ("cpp", "ii"),
+                        ("CPP", "ii"),
+                        ("c++", "ii"),
+                        ("C", "ii"),
+                        ("m", "mi"),
+                        ("mm", "mii"),
+                        ("M", "mii"),
+                        ("cu", "cui"),
+                    ]
+                    .iter()
+                    .copied()
+                    .collect();
+                }
+                let input: PathBuf = input.into();
+                match input.extension().map(|e| e.to_str()) {
+                    Some(Some(e)) => match MAP.get(e) {
+                        Some(i) => input.with_extension(i),
+                        None => input,
+                    },
+                    _ => input,
+                }
+            }
+        }
+    };
+
     CompilerArguments::Ok(ParsedArguments {
         input: input.into(),
-        language,
+        #[cfg(feature = "dist-client")]
+        dist_input,
         compilation_flag,
         depfile: None,
         outputs,
@@ -547,39 +657,19 @@ pub async fn preprocess<T>(
     cwd: &Path,
     env_vars: &[(OsString, OsString)],
     may_dist: bool,
-    kind: CCompilerKind,
-    rewrite_includes_only: bool,
 ) -> Result<process::Output>
 where
     T: CommandCreatorSync,
 {
     trace!("preprocess");
-    let language = match parsed_args.language {
-        Language::C => "c",
-        Language::Cxx => "c++",
-        Language::ObjectiveC => "objective-c",
-        Language::ObjectiveCxx => "objective-c++",
-        Language::Cuda => "cu",
-    };
     let mut cmd = creator.clone().new_command_sync(executable);
-    cmd.arg("-x").arg(language).arg("-E");
+    cmd.arg("-E");
     // When performing distributed compilation, line number info is important for error
     // reporting and to not cause spurious compilation failure (e.g. no exceptions build
     // fails due to exceptions transitively included in the stdlib).
     // With -fprofile-generate line number information is important, so don't use -P.
     if !may_dist && !parsed_args.profile_generate {
         cmd.arg("-P");
-    }
-    if rewrite_includes_only {
-        match kind {
-            CCompilerKind::Clang => {
-                cmd.arg("-frewrite-includes");
-            }
-            CCompilerKind::Gcc => {
-                cmd.arg("-fdirectives-only");
-            }
-            _ => {}
-        }
     }
     cmd.arg(&parsed_args.input)
         .args(&parsed_args.preprocessor_args)
@@ -601,15 +691,11 @@ pub fn generate_compile_commands(
     parsed_args: &ParsedArguments,
     cwd: &Path,
     env_vars: &[(OsString, OsString)],
-    kind: CCompilerKind,
-    rewrite_includes_only: bool,
 ) -> Result<(CompileCommand, Option<dist::CompileCommand>, Cacheable)> {
     // Unused arguments
     #[cfg(not(feature = "dist-client"))]
     {
         let _ = path_transformer;
-        let _ = kind;
-        let _ = rewrite_includes_only;
     }
 
     trace!("compile");
@@ -619,18 +705,7 @@ pub fn generate_compile_commands(
         None => return Err(anyhow!("Missing object file output")),
     };
 
-    // Pass the language explicitly as we might have gotten it from the
-    // command line.
-    let language = match parsed_args.language {
-        Language::C => "c",
-        Language::Cxx => "c++",
-        Language::ObjectiveC => "objective-c",
-        Language::ObjectiveCxx => "objective-c++",
-        Language::Cuda => "cu",
-    };
     let mut arguments: Vec<OsString> = vec![
-        "-x".into(),
-        language.into(),
         parsed_args.compilation_flag.clone(),
         parsed_args.input.clone().into(),
         "-o".into(),
@@ -650,47 +725,12 @@ pub fn generate_compile_commands(
     #[cfg(feature = "dist-client")]
     let dist_command = (|| {
         // https://gcc.gnu.org/onlinedocs/gcc-4.9.0/gcc/Overall-Options.html
-        let mut language: String = match parsed_args.language {
-            Language::C => "c",
-            Language::Cxx => "c++",
-            Language::ObjectiveC => "objective-c",
-            Language::ObjectiveCxx => "objective-c++",
-            Language::Cuda => "cu",
-        }
-        .into();
-        if !rewrite_includes_only {
-            match parsed_args.language {
-                Language::C => language = "cpp-output".into(),
-                _ => language.push_str("-cpp-output"),
-            }
-        }
         let mut arguments: Vec<String> = vec![
-            "-x".into(),
-            language,
             parsed_args.compilation_flag.clone().into_string().ok()?,
-            path_transformer.as_dist(&parsed_args.input)?,
+            path_transformer.as_dist(&parsed_args.dist_input)?,
             "-o".into(),
             path_transformer.as_dist(out_file)?,
         ];
-        if let CCompilerKind::Gcc = kind {
-            // From https://gcc.gnu.org/onlinedocs/gcc/Preprocessor-Options.html:
-            //
-            // -fdirectives-only
-            //
-            //     [...]
-            //
-            //     With -fpreprocessed, predefinition of command line and most
-            //     builtin macros is disabled. Macros such as __LINE__, which
-            //     are contextually dependent, are handled normally. This
-            //     enables compilation of files previously preprocessed with -E
-            //     -fdirectives-only.
-            //
-            // Which is exactly what we do :-)
-            if rewrite_includes_only {
-                arguments.push("-fdirectives-only".into());
-            }
-            arguments.push("-fpreprocessed".into());
-        }
         arguments.extend(dist::osstrings_to_strings(&parsed_args.common_args)?);
         Some(dist::CompileCommand {
             executable: path_transformer.as_dist(executable)?,
@@ -782,12 +822,33 @@ mod test {
     use crate::mock_command::*;
     use crate::test::utils::*;
 
-    fn parse_arguments_(
+    fn parse_arguments_(arguments: Vec<String>) -> CompilerArguments<ParsedArguments> {
+        let args = arguments.iter().map(OsString::from).collect::<Vec<_>>();
+        parse_arguments(
+            &args,
+            ".".as_ref(),
+            None,
+            #[cfg(feature = "dist-client")]
+            false,
+            #[cfg(feature = "dist-client")]
+            CCompilerKind::Gcc,
+            &ARGS[..],
+        )
+    }
+
+    #[cfg(feature = "dist-client")]
+    fn parse_arguments_rewrite_include_(
         arguments: Vec<String>,
-        plusplus: bool,
     ) -> CompilerArguments<ParsedArguments> {
         let args = arguments.iter().map(OsString::from).collect::<Vec<_>>();
-        parse_arguments(&args, ".".as_ref(), None, &ARGS[..], plusplus)
+        parse_arguments(
+            &args,
+            ".".as_ref(),
+            None,
+            true,
+            CCompilerKind::Gcc,
+            &ARGS[..],
+        )
     }
 
     #[test]
@@ -795,19 +856,17 @@ mod test {
         let args = stringvec!["-c", "foo.c", "-o", "foo.o"];
         let ParsedArguments {
             input,
-            language,
             compilation_flag,
             outputs,
             preprocessor_args,
             msvc_show_includes,
             common_args,
             ..
-        } = match parse_arguments_(args, false) {
+        } = match parse_arguments_(args) {
             CompilerArguments::Ok(args) => args,
             o => panic!("Got unexpected parse result: {:?}", o),
         };
         assert_eq!(Some("foo.c"), input.to_str());
-        assert_eq!(Language::C, language);
         assert_eq!(Some("-c"), compilation_flag.to_str());
         assert_map_contains!(outputs, ("obj", PathBuf::from("foo.o")));
         assert!(preprocessor_args.is_empty());
@@ -820,18 +879,16 @@ mod test {
         let args = stringvec!["-c", "foo.c"];
         let ParsedArguments {
             input,
-            language,
             outputs,
             preprocessor_args,
             msvc_show_includes,
             common_args,
             ..
-        } = match parse_arguments_(args, false) {
+        } = match parse_arguments_(args) {
             CompilerArguments::Ok(args) => args,
             o => panic!("Got unexpected parse result: {:?}", o),
         };
         assert_eq!(Some("foo.c"), input.to_str());
-        assert_eq!(Language::C, language);
         assert_map_contains!(outputs, ("obj", PathBuf::from("foo.o")));
         assert!(preprocessor_args.is_empty());
         assert!(common_args.is_empty());
@@ -841,7 +898,7 @@ mod test {
     #[test]
     fn test_parse_arguments_default_outputdir() {
         let args = stringvec!["-c", "/tmp/foo.c"];
-        let ParsedArguments { outputs, .. } = match parse_arguments_(args, false) {
+        let ParsedArguments { outputs, .. } = match parse_arguments_(args) {
             CompilerArguments::Ok(args) => args,
             o => panic!("Got unexpected parse result: {:?}", o),
         };
@@ -853,18 +910,16 @@ mod test {
         let args = stringvec!["-gsplit-dwarf", "-c", "foo.cpp", "-o", "foo.o"];
         let ParsedArguments {
             input,
-            language,
             outputs,
             preprocessor_args,
             msvc_show_includes,
             common_args,
             ..
-        } = match parse_arguments_(args, false) {
+        } = match parse_arguments_(args) {
             CompilerArguments::Ok(args) => args,
             o => panic!("Got unexpected parse result: {:?}", o),
         };
         assert_eq!(Some("foo.cpp"), input.to_str());
-        assert_eq!(Language::Cxx, language);
         assert_map_contains!(
             outputs,
             ("obj", PathBuf::from("foo.o")),
@@ -892,18 +947,16 @@ mod test {
 
         let ParsedArguments {
             input,
-            language,
             outputs,
             preprocessor_args,
             msvc_show_includes,
             common_args,
             ..
-        } = match parse_arguments_(args, false) {
+        } = match parse_arguments_(args) {
             CompilerArguments::Ok(args) => args,
             o => panic!("Got unexpected parse result: {:?}", o),
         };
         assert_eq!(Some("foo.c"), input.to_str());
-        assert_eq!(Language::C, language);
         assert_map_contains!(outputs, ("obj", PathBuf::from("foo.o")));
         assert!(preprocessor_args.is_empty());
         assert_eq!(3, common_args.len());
@@ -915,19 +968,17 @@ mod test {
         let args = stringvec!["--coverage", "-c", "foo.cpp", "-o", "foo.o"];
         let ParsedArguments {
             input,
-            language,
             outputs,
             preprocessor_args,
             msvc_show_includes,
             common_args,
             profile_generate,
             ..
-        } = match parse_arguments_(args, false) {
+        } = match parse_arguments_(args) {
             CompilerArguments::Ok(args) => args,
             o => panic!("Got unexpected parse result: {:?}", o),
         };
         assert_eq!(Some("foo.cpp"), input.to_str());
-        assert_eq!(Language::Cxx, language);
         assert_map_contains!(
             outputs,
             ("obj", PathBuf::from("foo.o")),
@@ -944,19 +995,17 @@ mod test {
         let args = stringvec!["-ftest-coverage", "-c", "foo.cpp", "-o", "foo.o"];
         let ParsedArguments {
             input,
-            language,
             outputs,
             preprocessor_args,
             msvc_show_includes,
             common_args,
             profile_generate,
             ..
-        } = match parse_arguments_(args, false) {
+        } = match parse_arguments_(args) {
             CompilerArguments::Ok(args) => args,
             o => panic!("Got unexpected parse result: {:?}", o),
         };
         assert_eq!(Some("foo.cpp"), input.to_str());
-        assert_eq!(Language::Cxx, language);
         assert_map_contains!(
             outputs,
             ("obj", PathBuf::from("foo.o")),
@@ -973,19 +1022,17 @@ mod test {
         let args = stringvec!["-fprofile-generate", "-c", "foo.cpp", "-o", "foo.o"];
         let ParsedArguments {
             input,
-            language,
             outputs,
             preprocessor_args,
             msvc_show_includes,
             common_args,
             profile_generate,
             ..
-        } = match parse_arguments_(args, false) {
+        } = match parse_arguments_(args) {
             CompilerArguments::Ok(args) => args,
             o => panic!("Got unexpected parse result: {:?}", o),
         };
         assert_eq!(Some("foo.cpp"), input.to_str());
-        assert_eq!(Language::Cxx, language);
         assert_map_contains!(outputs, ("obj", PathBuf::from("foo.o")));
         assert!(preprocessor_args.is_empty());
         assert_eq!(ovec!["-fprofile-generate"], common_args);
@@ -998,18 +1045,16 @@ mod test {
         let args = stringvec!["-c", "foo.cc", "-fabc", "-o", "foo.o", "-mxyz"];
         let ParsedArguments {
             input,
-            language,
             outputs,
             preprocessor_args,
             msvc_show_includes,
             common_args,
             ..
-        } = match parse_arguments_(args, false) {
+        } = match parse_arguments_(args) {
             CompilerArguments::Ok(args) => args,
             o => panic!("Got unexpected parse result: {:?}", o),
         };
         assert_eq!(Some("foo.cc"), input.to_str());
-        assert_eq!(Language::Cxx, language);
         assert_map_contains!(outputs, ("obj", PathBuf::from("foo.o")));
         assert!(preprocessor_args.is_empty());
         assert_eq!(ovec!["-fabc", "-mxyz"], common_args);
@@ -1023,18 +1068,16 @@ mod test {
         ];
         let ParsedArguments {
             input,
-            language,
             outputs,
             preprocessor_args,
             msvc_show_includes,
             common_args,
             ..
-        } = match parse_arguments_(args, false) {
+        } = match parse_arguments_(args) {
             CompilerArguments::Ok(args) => args,
             o => panic!("Got unexpected parse result: {:?}", o),
         };
         assert_eq!(Some("foo.cxx"), input.to_str());
-        assert_eq!(Language::Cxx, language);
         assert_map_contains!(outputs, ("obj", PathBuf::from("foo.o")));
         assert_eq!(ovec!["-Iinclude", "-include", "file"], preprocessor_args);
         assert_eq!(ovec!["-fabc"], common_args);
@@ -1057,19 +1100,17 @@ mod test {
         ];
         let ParsedArguments {
             input,
-            language,
             outputs,
             dependency_args,
             preprocessor_args,
             msvc_show_includes,
             common_args,
             ..
-        } = match parse_arguments_(args, false) {
+        } = match parse_arguments_(args) {
             CompilerArguments::Ok(args) => args,
             o => panic!("Got unexpected parse result: {:?}", o),
         };
         assert_eq!(Some("foo.c"), input.to_str());
-        assert_eq!(Language::C, language);
         assert_map_contains!(outputs, ("obj", PathBuf::from("foo.o")));
         assert_eq!(ovec!["-MF", "file"], dependency_args);
         assert_eq!(ovec!["-nostdinc"], preprocessor_args);
@@ -1083,18 +1124,16 @@ mod test {
             stringvec!["-c", "foo.c", "-MT", "depfile", "-fabc", "-MF", "file", "-o", "foo.o"];
         let ParsedArguments {
             input,
-            language,
             outputs,
             dependency_args,
             msvc_show_includes,
             common_args,
             ..
-        } = match parse_arguments_(args, false) {
+        } = match parse_arguments_(args) {
             CompilerArguments::Ok(args) => args,
             o => panic!("Got unexpected parse result: {:?}", o),
         };
         assert_eq!(Some("foo.c"), input.to_str());
-        assert_eq!(Language::C, language);
         assert_map_contains!(outputs, ("obj", PathBuf::from("foo.o")));
         assert_eq!(ovec!["-MF", "file"], dependency_args);
         assert_eq!(ovec!["-fabc"], common_args);
@@ -1108,19 +1147,17 @@ mod test {
         ];
         let ParsedArguments {
             input,
-            language,
             outputs,
             dependency_args,
             preprocessor_args,
             msvc_show_includes,
             common_args,
             ..
-        } = match parse_arguments_(args, false) {
+        } = match parse_arguments_(args) {
             CompilerArguments::Ok(args) => args,
             o => panic!("Got unexpected parse result: {:?}", o),
         };
         assert_eq!(Some("foo.c"), input.to_str());
-        assert_eq!(Language::C, language);
         assert_map_contains!(outputs, ("obj", PathBuf::from("foo.o")));
         assert_eq!(
             ovec!["-MF", "file", "-MD", "-MT", "depfile"],
@@ -1138,19 +1175,17 @@ mod test {
         ];
         let ParsedArguments {
             input,
-            language,
             outputs,
             dependency_args,
             preprocessor_args,
             msvc_show_includes,
             common_args,
             ..
-        } = match parse_arguments_(args, false) {
+        } = match parse_arguments_(args) {
             CompilerArguments::Ok(args) => args,
             o => panic!("Got unexpected parse result: {:?}", o),
         };
         assert_eq!(Some("foo.c"), input.to_str());
-        assert_eq!(Language::C, language);
         assert_map_contains!(outputs, ("obj", PathBuf::from("foo.o")));
         assert_eq!(
             ovec!["-MF", "file", "-MD", "-MQ", "depfile"],
@@ -1165,7 +1200,7 @@ mod test {
     fn test_parse_arguments_diagnostics_color() {
         fn get_color_mode(color_flag: &str) -> ColorMode {
             let args = stringvec!["-c", "foo.c", color_flag];
-            match parse_arguments_(args, false) {
+            match parse_arguments_(args) {
                 CompilerArguments::Ok(args) => args.color_mode,
                 o => panic!("Got unexpected parse result: {:?}", o),
             }
@@ -1181,7 +1216,7 @@ mod test {
     #[test]
     fn color_mode_preprocess() {
         let args = stringvec!["-c", "foo.c", "-fdiagnostics-color"];
-        let args = match parse_arguments_(args, false) {
+        let args = match parse_arguments_(args) {
             CompilerArguments::Ok(args) => args,
             o => panic!("Got unexpected parse result: {:?}", o),
         };
@@ -1194,18 +1229,16 @@ mod test {
         let args = stringvec!["-c", "foo.c", "-fabc", "-MF", "file", "-o", "foo.o", "-MD"];
         let ParsedArguments {
             input,
-            language,
             outputs,
             dependency_args,
             msvc_show_includes,
             common_args,
             ..
-        } = match parse_arguments_(args, false) {
+        } = match parse_arguments_(args) {
             CompilerArguments::Ok(args) => args,
             o => panic!("Got unexpected parse result: {:?}", o),
         };
         assert_eq!(Some("foo.c"), input.to_str());
-        assert_eq!(Language::C, language);
         assert_map_contains!(outputs, ("obj", PathBuf::from("foo.o")));
         assert_eq!(ovec!["-MF", "file", "-MD", "-MT", "foo.o"], dependency_args);
         assert_eq!(ovec!["-fabc"], common_args);
@@ -1214,17 +1247,14 @@ mod test {
 
     #[test]
     fn test_parse_arguments_empty_args() {
-        assert_eq!(
-            CompilerArguments::NotCompilation,
-            parse_arguments_(vec!(), false)
-        );
+        assert_eq!(CompilerArguments::NotCompilation, parse_arguments_(vec!()));
     }
 
     #[test]
     fn test_parse_arguments_not_compile() {
         assert_eq!(
             CompilerArguments::NotCompilation,
-            parse_arguments_(stringvec!["-o", "foo"], false)
+            parse_arguments_(stringvec!["-o", "foo"])
         );
     }
 
@@ -1232,7 +1262,7 @@ mod test {
     fn test_parse_arguments_too_many_inputs() {
         assert_eq!(
             CompilerArguments::CannotCache("multiple input files", None),
-            parse_arguments_(stringvec!["-c", "foo.c", "-o", "foo.o", "bar.c"], false)
+            parse_arguments_(stringvec!["-c", "foo.c", "-o", "foo.o", "bar.c"])
         );
     }
 
@@ -1240,10 +1270,7 @@ mod test {
     fn test_parse_arguments_link() {
         assert_eq!(
             CompilerArguments::NotCompilation,
-            parse_arguments_(
-                stringvec!["-shared", "foo.o", "-o", "foo.so", "bar.o"],
-                false
-            )
+            parse_arguments_(stringvec!["-shared", "foo.o", "-o", "foo.so", "bar.o"])
         );
     }
 
@@ -1251,17 +1278,17 @@ mod test {
     fn test_parse_arguments_pgo() {
         assert_eq!(
             CompilerArguments::CannotCache("-fprofile-use", None),
-            parse_arguments_(
-                stringvec!["-c", "foo.c", "-fprofile-use", "-o", "foo.o"],
-                false
-            )
+            parse_arguments_(stringvec!["-c", "foo.c", "-fprofile-use", "-o", "foo.o"])
         );
         assert_eq!(
             CompilerArguments::CannotCache("-fprofile-use", None),
-            parse_arguments_(
-                stringvec!["-c", "foo.c", "-fprofile-use=file", "-o", "foo.o"],
-                false
-            )
+            parse_arguments_(stringvec![
+                "-c",
+                "foo.c",
+                "-fprofile-use=file",
+                "-o",
+                "foo.o"
+            ])
         );
     }
 
@@ -1269,40 +1296,33 @@ mod test {
     fn test_parse_arguments_response_file() {
         assert_eq!(
             CompilerArguments::CannotCache("@", None),
-            parse_arguments_(stringvec!["-c", "foo.c", "@foo", "-o", "foo.o"], false)
+            parse_arguments_(stringvec!["-c", "foo.c", "@foo", "-o", "foo.o"])
         );
         assert_eq!(
             CompilerArguments::CannotCache("@", None),
-            parse_arguments_(stringvec!["-c", "foo.c", "-o", "@foo"], false)
+            parse_arguments_(stringvec!["-c", "foo.c", "-o", "@foo"])
         );
     }
 
     #[test]
     fn test_parse_arguments_multiple_arch() {
-        match parse_arguments_(
-            stringvec!["-arch", "arm64", "-o", "foo.o", "-c", "foo.cpp"],
-            false,
-        ) {
+        match parse_arguments_(stringvec!["-arch", "arm64", "-o", "foo.o", "-c", "foo.cpp"]) {
             CompilerArguments::Ok(_) => {}
             o => panic!("Got unexpected parse result: {:?}", o),
         }
 
-        match parse_arguments_(
-            stringvec!["-arch", "arm64", "-arch", "arm64", "-o", "foo.o", "-c", "foo.cpp"],
-            false,
-        ) {
+        match parse_arguments_(stringvec![
+            "-arch", "arm64", "-arch", "arm64", "-o", "foo.o", "-c", "foo.cpp"
+        ]) {
             CompilerArguments::Ok(_) => {}
             o => panic!("Got unexpected parse result: {:?}", o),
         }
 
         assert_eq!(
             CompilerArguments::CannotCache("multiple different -arch", None),
-            parse_arguments_(
-                stringvec![
-                    "-fPIC", "-arch", "arm64", "-arch", "i386", "-o", "foo.o", "-c", "foo.cpp"
-                ],
-                false
-            )
+            parse_arguments_(stringvec![
+                "-fPIC", "-arch", "arm64", "-arch", "i386", "-o", "foo.o", "-c", "foo.cpp"
+            ])
         );
     }
 
@@ -1323,18 +1343,16 @@ mod test {
         let arg = format!("@{}", td.path().join("foo").display());
         let ParsedArguments {
             input,
-            language,
             outputs,
             preprocessor_args,
             msvc_show_includes,
             common_args,
             ..
-        } = match parse_arguments_(vec![arg], false) {
+        } = match parse_arguments_(vec![arg]) {
             CompilerArguments::Ok(args) => args,
             o => panic!("Got unexpected parse result: {:?}", o),
         };
         assert_eq!(Some("foo.c"), input.to_str());
-        assert_eq!(Language::C, language);
         assert_map_contains!(outputs, ("obj", PathBuf::from("foo.o")));
         assert!(preprocessor_args.is_empty());
         assert!(common_args.is_empty());
@@ -1347,7 +1365,8 @@ mod test {
         let f = TestFixture::new();
         let parsed_args = ParsedArguments {
             input: "foo.c".into(),
-            language: Language::C,
+            #[cfg(feature = "dist-client")]
+            dist_input: "foo.i".into(),
             compilation_flag: "-c".into(),
             depfile: None,
             outputs: vec![("obj", "foo.o".into())].into_iter().collect(),
@@ -1369,12 +1388,13 @@ mod test {
             &parsed_args,
             f.tempdir.path(),
             &[],
-            CCompilerKind::Gcc,
-            false,
         )
         .unwrap();
         #[cfg(feature = "dist-client")]
-        assert!(dist_command.is_some());
+        match dist_command {
+            Some(cmd) => assert!(cmd.arguments.iter().any(|x| x == "foo.i")),
+            None => unreachable!(),
+        }
         #[cfg(not(feature = "dist-client"))]
         assert!(dist_command.is_none());
         let _ = command.execute(&creator).wait();
@@ -1384,27 +1404,36 @@ mod test {
     }
 
     #[test]
-    fn test_parse_arguments_plusplus() {
-        let args = stringvec!["-c", "foo.c", "-o", "foo.o"];
+    #[cfg(feature = "dist-client")]
+    fn test_parse_arguments_remote_rewrite_includes() {
+        let args = stringvec![
+            "-DX",
+            "-UY",
+            "-nostdinc",
+            "-x",
+            "c",
+            "-c",
+            "foo.c",
+            "-o",
+            "foo.o"
+        ];
         let ParsedArguments {
             input,
-            language,
-            compilation_flag,
+            dist_input,
             outputs,
             preprocessor_args,
-            msvc_show_includes,
+            compilation_flag,
             common_args,
             ..
-        } = match parse_arguments_(args, true) {
+        } = match parse_arguments_rewrite_include_(args) {
             CompilerArguments::Ok(args) => args,
             o => panic!("Got unexpected parse result: {:?}", o),
         };
         assert_eq!(Some("foo.c"), input.to_str());
-        assert_eq!(Language::Cxx, language);
-        assert_eq!(Some("-c"), compilation_flag.to_str());
+        assert_eq!(Some("foo.c"), dist_input.to_str());
         assert_map_contains!(outputs, ("obj", PathBuf::from("foo.o")));
-        assert!(preprocessor_args.is_empty());
-        assert!(common_args.is_empty());
-        assert!(!msvc_show_includes);
+        assert_eq!(ovec!["-nostdinc"], preprocessor_args);
+        assert_eq!(Some("-c -fpreprocessed"), compilation_flag.to_str());
+        assert_eq!(ovec!["-DX", "-UY", "-xc", "-fdirectives-only"], common_args);
     }
 }

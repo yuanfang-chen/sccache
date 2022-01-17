@@ -15,7 +15,7 @@
 #![allow(unused_imports, dead_code, unused_variables)]
 
 use crate::compiler::args::*;
-use crate::compiler::c::{CCompilerImpl, CCompilerKind, Language, ParsedArguments};
+use crate::compiler::c::{CCompilerImpl, CCompilerKind, ParsedArguments};
 use crate::compiler::gcc::ArgData::*;
 use crate::compiler::{gcc, write_temp_file, Cacheable, CompileCommand, CompilerArguments};
 use crate::dist;
@@ -32,31 +32,29 @@ use crate::errors::*;
 
 /// A struct on which to implement `CCompilerImpl`.
 #[derive(Clone, Debug)]
-pub struct Clang {
-    /// true iff this is clang++.
-    pub clangplusplus: bool,
-}
+pub struct Clang;
 
 #[async_trait]
 impl CCompilerImpl for Clang {
     fn kind(&self) -> CCompilerKind {
         CCompilerKind::Clang
     }
-    fn plusplus(&self) -> bool {
-        self.clangplusplus
-    }
     fn parse_arguments(
         &self,
         arguments: &[OsString],
         cwd: &Path,
         base_dir: Option<&PathBuf>,
+        #[cfg(feature = "dist-client")] rewrite_includes_only: bool,
     ) -> CompilerArguments<ParsedArguments> {
         gcc::parse_arguments(
             arguments,
             cwd,
             base_dir,
+            #[cfg(feature = "dist-client")]
+            rewrite_includes_only,
+            #[cfg(feature = "dist-client")]
+            self.kind(),
             (&gcc::ARGS[..], &ARGS[..]),
-            self.clangplusplus,
         )
     }
 
@@ -69,22 +67,11 @@ impl CCompilerImpl for Clang {
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
         may_dist: bool,
-        rewrite_includes_only: bool,
     ) -> Result<process::Output>
     where
         T: CommandCreatorSync,
     {
-        gcc::preprocess(
-            creator,
-            executable,
-            parsed_args,
-            cwd,
-            env_vars,
-            may_dist,
-            self.kind(),
-            rewrite_includes_only,
-        )
-        .await
+        gcc::preprocess(creator, executable, parsed_args, cwd, env_vars, may_dist).await
     }
 
     fn generate_compile_commands(
@@ -94,17 +81,8 @@ impl CCompilerImpl for Clang {
         parsed_args: &ParsedArguments,
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
-        rewrite_includes_only: bool,
     ) -> Result<(CompileCommand, Option<dist::CompileCommand>, Cacheable)> {
-        gcc::generate_compile_commands(
-            path_transformer,
-            executable,
-            parsed_args,
-            cwd,
-            env_vars,
-            self.kind(),
-            rewrite_includes_only,
-        )
+        gcc::generate_compile_commands(path_transformer, executable, parsed_args, cwd, env_vars)
     }
 }
 
@@ -148,10 +126,13 @@ mod test {
 
     fn parse_arguments_(arguments: Vec<String>) -> CompilerArguments<ParsedArguments> {
         let arguments = arguments.iter().map(OsString::from).collect::<Vec<_>>();
-        Clang {
-            clangplusplus: false,
-        }
-        .parse_arguments(&arguments, &std::env::current_dir().unwrap(), None)
+        Clang.parse_arguments(
+            &arguments,
+            &std::env::current_dir().unwrap(),
+            None,
+            #[cfg(feature = "dist-client")]
+            false,
+        )
     }
 
     macro_rules! parses {
@@ -163,11 +144,28 @@ mod test {
         }
     }
 
+    #[cfg(feature = "dist-client")]
+    fn parse_arguments_rewrite_include_(
+        arguments: Vec<String>,
+    ) -> CompilerArguments<ParsedArguments> {
+        let arguments = arguments.iter().map(OsString::from).collect::<Vec<_>>();
+        Clang.parse_arguments(&arguments, &std::env::current_dir().unwrap(), None, true)
+    }
+
+    #[cfg(feature = "dist-client")]
+    macro_rules! parses_rewrite_include {
+        ( $( $s:expr ),* ) => {
+            match parse_arguments_rewrite_include_(vec![ $( $s.to_string(), )* ]) {
+                CompilerArguments::Ok(a) => a,
+                o => panic!("Got unexpected parse result: {:?}", o),
+            }
+        }
+    }
+
     #[test]
     fn test_parse_arguments_simple() {
         let a = parses!("-c", "foo.c", "-o", "foo.o");
         assert_eq!(Some("foo.c"), a.input.to_str());
-        assert_eq!(Language::C, a.language);
         assert_map_contains!(a.outputs, ("obj", PathBuf::from("foo.o")));
         assert!(a.preprocessor_args.is_empty());
         assert!(a.common_args.is_empty());
@@ -180,7 +178,6 @@ mod test {
             "file"
         );
         assert_eq!(Some("foo.cxx"), a.input.to_str());
-        assert_eq!(Language::Cxx, a.language);
         assert_map_contains!(a.outputs, ("obj", PathBuf::from("foo.o")));
         assert_eq!(ovec!["-Iinclude", "-include", "file"], a.preprocessor_args);
         assert_eq!(ovec!["-arch", "xyz", "-fabc"], a.common_args);
@@ -546,5 +543,103 @@ mod test {
 
         let a = parses!("-c", "foo.c", "-o", "foo.o");
         assert_eq!(a.color_mode, ColorMode::Auto);
+    }
+
+    #[test]
+    #[cfg(not(feature = "dist-client"))]
+    fn test_parse_arguments_local_no_rewrite_includes() {
+        let a = parses!(
+            "-nostdinc",
+            "-Xclang",
+            "-trigraphs",
+            "-x",
+            "c",
+            "-c",
+            "foo.c",
+            "-o",
+            "foo.o"
+        );
+
+        assert_eq!(Some("foo.c"), a.input.to_str());
+        assert_map_contains!(a.outputs, ("obj", PathBuf::from("foo.o")));
+        assert_eq!(
+            ovec!["-nostdinc", "-Xclang", "-trigraphs"],
+            a.preprocessor_args
+        );
+        assert_eq!(Some("-c"), a.compilation_flag.to_str());
+        assert_eq!(ovec!["-xc"], a.common_args);
+    }
+
+    #[test]
+    #[cfg(feature = "dist-client")]
+    fn test_parse_arguments_remote_no_rewrite_includes_dash_x() {
+        let a = parses!(
+            "-nostdinc",
+            "-Xclang",
+            "-trigraphs",
+            "-x",
+            "c",
+            "-c",
+            "foo.c",
+            "-o",
+            "foo.o"
+        );
+        assert_eq!(Some("foo.c"), a.input.to_str());
+        assert_eq!(Some("foo.c"), a.dist_input.to_str());
+        assert_map_contains!(a.outputs, ("obj", PathBuf::from("foo.o")));
+        assert_eq!(
+            ovec!["-nostdinc", "-xc", "-Xclang", "-trigraphs"],
+            a.preprocessor_args
+        );
+        assert_eq!(Some("-c -x cpp-output"), a.compilation_flag.to_str());
+        assert!(a.common_args.is_empty());
+    }
+
+    #[test]
+    #[cfg(feature = "dist-client")]
+    fn test_parse_arguments_remote_no_rewrite_includes_file_extension() {
+        let a = parses!(
+            "-nostdinc",
+            "-Xclang",
+            "-trigraphs",
+            "-c",
+            "foo.c",
+            "-o",
+            "foo.o"
+        );
+        assert_eq!(Some("foo.c"), a.input.to_str());
+        assert_eq!(Some("foo.i"), a.dist_input.to_str());
+        assert_map_contains!(a.outputs, ("obj", PathBuf::from("foo.o")));
+        assert_eq!(
+            ovec!["-nostdinc", "-Xclang", "-trigraphs"],
+            a.preprocessor_args
+        );
+        assert_eq!(Some("-c"), a.compilation_flag.to_str());
+        assert!(a.common_args.is_empty());
+    }
+
+    #[test]
+    #[cfg(feature = "dist-client")]
+    fn test_parse_arguments_remote_rewrite_includes() {
+        let a = parses_rewrite_include!(
+            "-nostdinc",
+            "-Xclang",
+            "-trigraphs",
+            "-x",
+            "c",
+            "-c",
+            "foo.c",
+            "-o",
+            "foo.o"
+        );
+        assert_eq!(Some("foo.c"), a.input.to_str());
+        assert_eq!(Some("foo.c"), a.dist_input.to_str());
+        assert_map_contains!(a.outputs, ("obj", PathBuf::from("foo.o")));
+        assert_eq!(ovec!["-frewrite-includes"], a.preprocessor_args);
+        assert_eq!(Some("-c"), a.compilation_flag.to_str());
+        assert_eq!(
+            ovec!["-nostdinc", "-xc", "-Xclang", "-trigraphs"],
+            a.common_args
+        );
     }
 }

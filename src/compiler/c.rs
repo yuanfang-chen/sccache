@@ -60,23 +60,15 @@ where
     compiler: I,
 }
 
-#[derive(Debug, PartialEq, Clone, Copy)]
-pub enum Language {
-    C,
-    Cxx,
-    ObjectiveC,
-    ObjectiveCxx,
-    Cuda,
-}
-
 /// The results of parsing a compiler commandline.
 #[allow(dead_code)]
 #[derive(Debug, PartialEq, Clone)]
 pub struct ParsedArguments {
     /// The input source file.
     pub input: PathBuf,
-    /// The type of language used in the input source file.
-    pub language: Language,
+    /// The input source file for a distributed compilation.
+    #[cfg(feature = "dist-client")]
+    pub dist_input: PathBuf,
     /// The flag required to compile for the given language
     pub compilation_flag: OsString,
     /// The file in which to generate dependencies.
@@ -106,32 +98,6 @@ impl ParsedArguments {
             .and_then(|o| o.file_name())
             .map(|s| s.to_string_lossy())
             .unwrap_or(Cow::Borrowed("Unknown filename"))
-    }
-}
-
-impl Language {
-    pub fn from_file_name(file: &Path) -> Option<Self> {
-        match file.extension().and_then(|e| e.to_str()) {
-            Some("c") => Some(Language::C),
-            Some("C") | Some("cc") | Some("cpp") | Some("cxx") => Some(Language::Cxx),
-            Some("m") => Some(Language::ObjectiveC),
-            Some("mm") => Some(Language::ObjectiveCxx),
-            Some("cu") => Some(Language::Cuda),
-            e => {
-                trace!("Unknown source extension: {}", e.unwrap_or("(None)"));
-                None
-            }
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Language::C => "c",
-            Language::Cxx => "c++",
-            Language::ObjectiveC => "objc",
-            Language::ObjectiveCxx => "objc++",
-            Language::Cuda => "cuda",
-        }
     }
 }
 
@@ -166,14 +132,13 @@ pub enum CCompilerKind {
 pub trait CCompilerImpl: Clone + fmt::Debug + Send + Sync + 'static {
     /// Return the kind of compiler.
     fn kind(&self) -> CCompilerKind;
-    /// Return true iff this is g++ or clang++.
-    fn plusplus(&self) -> bool;
     /// Determine whether `arguments` are supported by this compiler.
     fn parse_arguments(
         &self,
         arguments: &[OsString],
         cwd: &Path,
         base_dir: Option<&PathBuf>,
+        #[cfg(feature = "dist-client")] rewrite_includes_only: bool,
     ) -> CompilerArguments<ParsedArguments>;
     /// Run the C preprocessor with the specified set of arguments.
     #[allow(clippy::too_many_arguments)]
@@ -185,7 +150,6 @@ pub trait CCompilerImpl: Clone + fmt::Debug + Send + Sync + 'static {
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
         may_dist: bool,
-        rewrite_includes_only: bool,
     ) -> Result<process::Output>
     where
         T: CommandCreatorSync;
@@ -198,7 +162,6 @@ pub trait CCompilerImpl: Clone + fmt::Debug + Send + Sync + 'static {
         parsed_args: &ParsedArguments,
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
-        rewrite_includes_only: bool,
     ) -> Result<(CompileCommand, Option<dist::CompileCommand>, Cacheable)>;
 }
 
@@ -235,11 +198,15 @@ impl<T: CommandCreatorSync, I: CCompilerImpl> Compiler<T> for CCompiler<I> {
         arguments: &[OsString],
         cwd: &Path,
         base_dir: Option<&PathBuf>,
+        #[cfg(feature = "dist-client")] rewrite_includes_only: bool,
     ) -> CompilerArguments<Box<dyn CompilerHasher<T> + 'static>> {
-        match self
-            .compiler
-            .parse_arguments(arguments, cwd, base_dir)
-        {
+        match self.compiler.parse_arguments(
+            arguments,
+            cwd,
+            base_dir,
+            #[cfg(feature = "dist-client")]
+            rewrite_includes_only,
+        ) {
             CompilerArguments::Ok(args) => CompilerArguments::Ok(Box::new(CCompilerHasher {
                 parsed_args: args,
                 executable: self.executable.clone(),
@@ -271,7 +238,6 @@ where
         env_vars: Vec<(OsString, OsString)>,
         may_dist: bool,
         pool: &tokio::runtime::Handle,
-        rewrite_includes_only: bool,
     ) -> Result<HashResult> {
         let CCompilerHasher {
             parsed_args,
@@ -288,7 +254,6 @@ where
                 &cwd,
                 &env_vars,
                 may_dist,
-                rewrite_includes_only,
             )
             .await;
         let out_pretty = parsed_args.output_pretty().into_owned();
@@ -348,12 +313,10 @@ where
         let key = {
             hash_key(
                 &executable_digest,
-                parsed_args.language,
                 &parsed_args.common_args,
                 &extra_hashes,
                 &env_vars,
                 &preprocessor_result.stdout,
-                compiler.plusplus(),
             )
         };
         // A compiler binary may be a symlink to another and so has the same digest, but that means
@@ -392,7 +355,6 @@ impl<I: CCompilerImpl> Compilation for CCompilation<I> {
     fn generate_compile_commands(
         &self,
         path_transformer: &mut dist::PathTransformer,
-        rewrite_includes_only: bool,
     ) -> Result<(CompileCommand, Option<dist::CompileCommand>, Cacheable)> {
         let CCompilation {
             ref parsed_args,
@@ -402,14 +364,7 @@ impl<I: CCompilerImpl> Compilation for CCompilation<I> {
             ref env_vars,
             ..
         } = *self;
-        compiler.generate_compile_commands(
-            path_transformer,
-            executable,
-            parsed_args,
-            cwd,
-            env_vars,
-            rewrite_includes_only,
-        )
+        compiler.generate_compile_commands(path_transformer, executable, parsed_args, cwd, env_vars)
     }
 
     #[cfg(feature = "dist-client")]
@@ -425,10 +380,12 @@ impl<I: CCompilerImpl> Compilation for CCompilation<I> {
             compiler,
             ..
         } = *self;
-        trace!("Dist inputs: {:?}", parsed_args.input);
+        trace!("Dist inputs: {:?}", parsed_args.dist_input);
 
-        let input_path = cwd.join(&parsed_args.input);
+        let user_input_path = cwd.join(&parsed_args.input);
+        let input_path = cwd.join(&parsed_args.dist_input);
         let inputs_packager = Box::new(CInputsPackager {
+            user_input_path,
             input_path,
             preprocessed_input,
             path_transformer,
@@ -460,6 +417,7 @@ pub fn make_relative_path(cwd: &Path, base_dir: Option<&PathBuf>, p: &Path) -> O
 
 #[cfg(feature = "dist-client")]
 struct CInputsPackager {
+    user_input_path: PathBuf,
     input_path: PathBuf,
     path_transformer: dist::PathTransformer,
     preprocessed_input: Vec<u8>,
@@ -470,6 +428,7 @@ struct CInputsPackager {
 impl pkg::InputsPackager for CInputsPackager {
     fn write_inputs(self: Box<Self>, wtr: &mut dyn io::Write) -> Result<dist::PathTransformer> {
         let CInputsPackager {
+            user_input_path,
             input_path,
             mut path_transformer,
             preprocessed_input,
@@ -484,7 +443,7 @@ impl pkg::InputsPackager for CInputsPackager {
                 format!("unable to transform input path {}", input_path.display())
             })?;
 
-            let mut file_header = pkg::make_tar_header(&input_path, &dist_input_path)?;
+            let mut file_header = pkg::make_tar_header(&user_input_path, &dist_input_path)?;
             file_header.set_size(preprocessed_input.len() as u64); // The metadata is from non-preprocessed
             file_header.set_cksum();
             builder.append(&file_header, preprocessed_input.as_slice())?;
@@ -638,7 +597,7 @@ impl pkg::ToolchainPackager for CToolchainPackager {
 }
 
 /// The cache is versioned by the inputs to `hash_key`.
-pub const CACHE_VERSION: &[u8] = b"12";
+pub const CACHE_VERSION: &[u8] = b"13";
 
 lazy_static! {
     /// Environment variables that are factored into the cache key.
@@ -658,21 +617,15 @@ lazy_static! {
 // For C compilers, get hash key.
 pub fn hash_key(
     compiler_digest: &str,
-    language: Language,
     arguments: &[OsString],
     extra_hashes: &[String],
     env_vars: &[(OsString, OsString)],
     preprocessor_output: &[u8],
-    plusplus: bool,
 ) -> String {
     // If you change any of the inputs to the hash, you should change `CACHE_VERSION`.
     let mut m = Digest::new();
     m.update(compiler_digest.as_bytes());
-    // clang and clang++ have different behavior despite being byte-for-byte identical binaries, so
-    // we have to incorporate that into the hash as well.
-    m.update(&[plusplus as u8]);
     m.update(CACHE_VERSION);
-    m.update(language.as_str().as_bytes());
     for arg in arguments {
         trace!("hash: {:?}", &arg);
         arg.hash(&mut HashToDigest { digest: &mut m });
@@ -702,18 +655,8 @@ mod test {
         let args = ovec!["a", "b", "c"];
         const PREPROCESSED: &[u8] = b"hello world";
         assert_eq!(
-            hash_key("abcd", Language::C, &args, &[], &[], PREPROCESSED, false),
-            hash_key("abcd", Language::C, &args, &[], &[], PREPROCESSED, false)
-        );
-    }
-
-    #[test]
-    fn test_plusplus_differs() {
-        let args = ovec!["a", "b", "c"];
-        const PREPROCESSED: &[u8] = b"hello world";
-        assert_neq!(
-            hash_key("abcd", Language::C, &args, &[], &[], PREPROCESSED, false),
-            hash_key("abcd", Language::C, &args, &[], &[], PREPROCESSED, true)
+            hash_key("abcd", &args, &[], &[], PREPROCESSED),
+            hash_key("abcd", &args, &[], &[], PREPROCESSED)
         );
     }
 
@@ -722,8 +665,8 @@ mod test {
         let args = ovec!["a", "b", "c"];
         const PREPROCESSED: &[u8] = b"hello world";
         assert_neq!(
-            hash_key("abcd", Language::C, &args, &[], &[], PREPROCESSED, false),
-            hash_key("wxyz", Language::C, &args, &[], &[], PREPROCESSED, false)
+            hash_key("abcd", &args, &[], &[], PREPROCESSED),
+            hash_key("wxyz", &args, &[], &[], PREPROCESSED)
         );
     }
 
@@ -736,18 +679,18 @@ mod test {
         let a = ovec!["a"];
         const PREPROCESSED: &[u8] = b"hello world";
         assert_neq!(
-            hash_key(digest, Language::C, &abc, &[], &[], PREPROCESSED, false),
-            hash_key(digest, Language::C, &xyz, &[], &[], PREPROCESSED, false)
+            hash_key(digest, &abc, &[], &[], PREPROCESSED),
+            hash_key(digest, &xyz, &[], &[], PREPROCESSED)
         );
 
         assert_neq!(
-            hash_key(digest, Language::C, &abc, &[], &[], PREPROCESSED, false),
-            hash_key(digest, Language::C, &ab, &[], &[], PREPROCESSED, false)
+            hash_key(digest, &abc, &[], &[], PREPROCESSED),
+            hash_key(digest, &ab, &[], &[], PREPROCESSED)
         );
 
         assert_neq!(
-            hash_key(digest, Language::C, &abc, &[], &[], PREPROCESSED, false),
-            hash_key(digest, Language::C, &a, &[], &[], PREPROCESSED, false)
+            hash_key(digest, &abc, &[], &[], PREPROCESSED),
+            hash_key(digest, &a, &[], &[], PREPROCESSED)
         );
     }
 
@@ -755,16 +698,8 @@ mod test {
     fn test_hash_key_preprocessed_content_differs() {
         let args = ovec!["a", "b", "c"];
         assert_neq!(
-            hash_key(
-                "abcd",
-                Language::C,
-                &args,
-                &[],
-                &[],
-                &b"hello world"[..],
-                false
-            ),
-            hash_key("abcd", Language::C, &args, &[], &[], &b"goodbye"[..], false)
+            hash_key("abcd", &args, &[], &[], &b"hello world"[..]),
+            hash_key("abcd", &args, &[], &[], &b"goodbye"[..])
         );
     }
 
@@ -774,11 +709,11 @@ mod test {
         let digest = "abcd";
         const PREPROCESSED: &[u8] = b"hello world";
         for var in CACHED_ENV_VARS.iter() {
-            let h1 = hash_key(digest, Language::C, &args, &[], &[], PREPROCESSED, false);
+            let h1 = hash_key(digest, &args, &[], &[], PREPROCESSED);
             let vars = vec![(OsString::from(var), OsString::from("something"))];
-            let h2 = hash_key(digest, Language::C, &args, &[], &vars, PREPROCESSED, false);
+            let h2 = hash_key(digest, &args, &[], &vars, PREPROCESSED);
             let vars = vec![(OsString::from(var), OsString::from("something else"))];
-            let h3 = hash_key(digest, Language::C, &args, &[], &vars, PREPROCESSED, false);
+            let h3 = hash_key(digest, &args, &[], &vars, PREPROCESSED);
             assert_neq!(h1, h2);
             assert_neq!(h2, h3);
         }
@@ -792,16 +727,8 @@ mod test {
         let extra_data = stringvec!["hello", "world"];
 
         assert_neq!(
-            hash_key(
-                digest,
-                Language::C,
-                &args,
-                &extra_data,
-                &[],
-                PREPROCESSED,
-                false
-            ),
-            hash_key(digest, Language::C, &args, &[], &[], PREPROCESSED, false)
+            hash_key(digest, &args, &extra_data, &[], PREPROCESSED),
+            hash_key(digest, &args, &[], &[], PREPROCESSED)
         );
     }
 }

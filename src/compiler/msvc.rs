@@ -13,9 +13,7 @@
 // limitations under the License.
 
 use crate::compiler::args::*;
-use crate::compiler::c::{
-    make_relative_path, CCompilerImpl, CCompilerKind, Language, ParsedArguments,
-};
+use crate::compiler::c::{make_relative_path, CCompilerImpl, CCompilerKind, ParsedArguments};
 use crate::compiler::{
     clang, gcc, write_temp_file, Cacheable, ColorMode, CompileCommand, CompilerArguments,
 };
@@ -48,16 +46,21 @@ impl CCompilerImpl for Msvc {
     fn kind(&self) -> CCompilerKind {
         CCompilerKind::Msvc
     }
-    fn plusplus(&self) -> bool {
-        false
-    }
     fn parse_arguments(
         &self,
         arguments: &[OsString],
         cwd: &Path,
         base_dir: Option<&PathBuf>,
+        #[cfg(feature = "dist-client")] rewrite_includes_only: bool,
     ) -> CompilerArguments<ParsedArguments> {
-        parse_arguments(arguments, cwd, base_dir, self.is_clang)
+        parse_arguments(
+            arguments,
+            cwd,
+            base_dir,
+            #[cfg(feature = "dist-client")]
+            rewrite_includes_only,
+            self.is_clang,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -69,7 +72,6 @@ impl CCompilerImpl for Msvc {
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
         may_dist: bool,
-        rewrite_includes_only: bool,
     ) -> Result<process::Output>
     where
         T: CommandCreatorSync,
@@ -82,7 +84,6 @@ impl CCompilerImpl for Msvc {
             env_vars,
             may_dist,
             &self.includes_prefix,
-            rewrite_includes_only,
             self.is_clang,
         )
         .await
@@ -95,7 +96,6 @@ impl CCompilerImpl for Msvc {
         parsed_args: &ParsedArguments,
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
-        _rewrite_includes_only: bool,
     ) -> Result<(CompileCommand, Option<dist::CompileCommand>, Cacheable)> {
         generate_compile_commands(path_transformer, executable, parsed_args, cwd, env_vars)
     }
@@ -313,6 +313,7 @@ pub fn parse_arguments(
     arguments: &[OsString],
     cwd: &Path,
     base_dir: Option<&PathBuf>,
+    #[cfg(feature = "dist-client")] rewrite_includes_only: bool,
     is_clang: bool,
 ) -> CompilerArguments<ParsedArguments> {
     let mut output_arg = None;
@@ -332,6 +333,8 @@ pub fn parse_arguments(
     let mut profile_generate = false;
     #[cfg(not(windows))]
     let src_file_suffixes = vec![".c", ".cc", ".cp", ".cxx", ".cpp", ".CPP", ".c++", ".C"];
+    #[cfg(feature = "dist-client")]
+    let rewrite_includes_only = rewrite_includes_only && is_clang;
     let path_transformer_fn = &|p: &PathBuf| make_relative_path(cwd, base_dir, p);
 
     for arg in ArgsIter::new(
@@ -410,10 +413,28 @@ pub fn parse_arguments(
         match arg.get_data() {
             Some(PreprocessorArgumentFlag)
             | Some(PreprocessorArgument(_))
-            | Some(PreprocessorArgumentPath(_)) => preprocessor_args.extend(
-                arg.normalize(NormalizedDisposition::Concatenated)
-                    .iter_os_strings(),
-            ),
+            | Some(PreprocessorArgumentPath(_)) => {
+                #[cfg(not(feature = "dist-client"))]
+                preprocessor_args.extend(
+                    arg.normalize(NormalizedDisposition::Concatenated)
+                        .iter_os_strings(),
+                );
+
+                #[cfg(feature = "dist-client")]
+                if rewrite_includes_only {
+                    for arg in arg
+                        .normalize(NormalizedDisposition::Concatenated)
+                        .iter_os_strings2(path_transformer_fn)
+                    {
+                        common_args.push(try_string_arg!(arg))
+                    }
+                } else {
+                    preprocessor_args.extend(
+                        arg.normalize(NormalizedDisposition::Concatenated)
+                            .iter_os_strings(),
+                    )
+                };
+            }
             Some(ProgramDatabase(_))
             | Some(DebugInfo)
             | Some(PassThroughWithPath(_))
@@ -522,7 +543,18 @@ pub fn parse_arguments(
                 }
                 Some(PreprocessorArgumentFlag)
                 | Some(PreprocessorArgument(_))
-                | Some(PreprocessorArgumentPath(_)) => &mut preprocessor_args,
+                | Some(PreprocessorArgumentPath(_)) => {
+                    #[cfg(not(feature = "dist-client"))]
+                    let args = &mut preprocessor_args;
+                    #[cfg(feature = "dist-client")]
+                    let args = if rewrite_includes_only {
+                        is_common_args = true;
+                        &mut common_args
+                    } else {
+                        &mut preprocessor_args
+                    };
+                    args
+                }
                 Some(DepArgumentPath(_)) | Some(DepTarget(_)) | Some(NeedDepTarget) => {
                     &mut dependency_args
                 }
@@ -550,11 +582,8 @@ pub fn parse_arguments(
     if !compilation {
         return CompilerArguments::NotCompilation;
     }
-    let (input, language) = match input_arg {
-        Some(i) => match Language::from_file_name(Path::new(&i)) {
-            Some(l) => (i.to_owned(), l),
-            None => cannot_cache!("unknown source language"),
-        },
+    let input = match input_arg {
+        Some(i) => i,
         // We can't cache compilation without an input.
         None => cannot_cache!("no input file"),
     };
@@ -582,9 +611,15 @@ pub fn parse_arguments(
         };
     }
 
+    #[cfg(feature = "dist-client")]
+    if rewrite_includes_only {
+        common_args.push("-clang:-frewrite-includes".into());
+    }
+
     CompilerArguments::Ok(ParsedArguments {
-        input: input.into(),
-        language,
+        input: input.clone().into(),
+        #[cfg(feature = "dist-client")]
+        dist_input: input.into(),
         compilation_flag,
         depfile,
         outputs,
@@ -643,8 +678,7 @@ pub async fn preprocess<T>(
     env_vars: &[(OsString, OsString)],
     may_dist: bool,
     includes_prefix: &str,
-    rewrite_includes_only: bool,
-    is_clang: bool,
+    _is_clang: bool,
 ) -> Result<process::Output>
 where
     T: CommandCreatorSync,
@@ -673,9 +707,6 @@ where
         .current_dir(&cwd);
     if parsed_args.depfile.is_some() && !parsed_args.msvc_show_includes {
         cmd.arg("-showIncludes");
-    }
-    if rewrite_includes_only && is_clang {
-        cmd.arg("-clang:-frewrite-includes");
     }
 
     if log_enabled!(Debug) {
@@ -807,7 +838,7 @@ fn generate_compile_commands(
 
         let mut arguments: Vec<String> = vec![
             parsed_args.compilation_flag.clone().into_string().ok()?,
-            path_transformer.as_dist(&parsed_args.input)?,
+            path_transformer.as_dist(&parsed_args.dist_input)?,
             fo,
         ];
         // It's important to avoid preprocessor_args because of things like /FI which
@@ -835,7 +866,14 @@ mod test {
     use crate::test::utils::*;
 
     fn parse_arguments(arguments: Vec<OsString>) -> CompilerArguments<ParsedArguments> {
-        super::parse_arguments(&arguments, &std::env::current_dir().unwrap(), None, false)
+        super::parse_arguments(
+            &arguments,
+            &std::env::current_dir().unwrap(),
+            None,
+            false,
+            #[cfg(feature = "dist-client")]
+            false,
+        )
     }
 
     #[test]
@@ -869,7 +907,6 @@ mod test {
         let args = ovec!["-c", "foo.c", "-Fofoo.obj"];
         let ParsedArguments {
             input,
-            language,
             compilation_flag,
             outputs,
             preprocessor_args,
@@ -881,7 +918,6 @@ mod test {
             o => panic!("Got unexpected parse result: {:?}", o),
         };
         assert_eq!(Some("foo.c"), input.to_str());
-        assert_eq!(Language::C, language);
         assert_eq!(Some("-c"), compilation_flag.to_str());
         assert_map_contains!(outputs, ("obj", PathBuf::from("foo.obj")));
         assert!(preprocessor_args.is_empty());
@@ -894,7 +930,6 @@ mod test {
         let args = ovec!["/C", "/PH", "/X", "/u", "/c", "foo.c"];
         let ParsedArguments {
             input,
-            language,
             compilation_flag,
             preprocessor_args,
             common_args,
@@ -904,7 +939,6 @@ mod test {
             o => panic!("Got unexpected parse result: {:?}", o),
         };
         assert_eq!(Some("foo.c"), input.to_str());
-        assert_eq!(Language::C, language);
         assert_eq!(Some("/c"), compilation_flag.to_str());
         assert_eq!(preprocessor_args, ovec!("/C", "/PH", "/X", "/u"));
         assert!(common_args.is_empty());
@@ -915,7 +949,6 @@ mod test {
         let args = ovec!["/c", "foo.c", "-Fofoo.obj"];
         let ParsedArguments {
             input,
-            language,
             compilation_flag,
             outputs,
             preprocessor_args,
@@ -927,7 +960,6 @@ mod test {
             o => panic!("Got unexpected parse result: {:?}", o),
         };
         assert_eq!(Some("foo.c"), input.to_str());
-        assert_eq!(Language::C, language);
         assert_eq!(Some("/c"), compilation_flag.to_str());
         assert_map_contains!(outputs, ("obj", PathBuf::from("foo.obj")));
         assert!(preprocessor_args.is_empty());
@@ -940,7 +972,6 @@ mod test {
         let args = ovec!["-c", "foo.c"];
         let ParsedArguments {
             input,
-            language,
             outputs,
             preprocessor_args,
             msvc_show_includes,
@@ -951,7 +982,6 @@ mod test {
             o => panic!("Got unexpected parse result: {:?}", o),
         };
         assert_eq!(Some("foo.c"), input.to_str());
-        assert_eq!(Language::C, language);
         assert_map_contains!(outputs, ("obj", PathBuf::from("foo.obj")));
         assert!(preprocessor_args.is_empty());
         assert!(common_args.is_empty());
@@ -963,7 +993,6 @@ mod test {
         let args = ovec!["-c", "foo.c", "/Fofoo.obj"];
         let ParsedArguments {
             input,
-            language,
             outputs,
             preprocessor_args,
             msvc_show_includes,
@@ -974,7 +1003,6 @@ mod test {
             o => panic!("Got unexpected parse result: {:?}", o),
         };
         assert_eq!(Some("foo.c"), input.to_str());
-        assert_eq!(Language::C, language);
         assert_map_contains!(outputs, ("obj", PathBuf::from("foo.obj")));
         assert!(preprocessor_args.is_empty());
         assert!(common_args.is_empty());
@@ -1062,7 +1090,6 @@ mod test {
         let args = ovec!["-c", "foo.c", "-foo", "-Fofoo.obj", "-bar"];
         let ParsedArguments {
             input,
-            language,
             outputs,
             preprocessor_args,
             msvc_show_includes,
@@ -1073,7 +1100,6 @@ mod test {
             o => panic!("Got unexpected parse result: {:?}", o),
         };
         assert_eq!(Some("foo.c"), input.to_str());
-        assert_eq!(Language::C, language);
         assert_map_contains!(outputs, ("obj", PathBuf::from("foo.obj")));
         assert!(preprocessor_args.is_empty());
         assert_eq!(common_args, ovec!["-foo", "-bar"]);
@@ -1094,7 +1120,6 @@ mod test {
         ];
         let ParsedArguments {
             input,
-            language,
             outputs,
             preprocessor_args,
             dependency_args,
@@ -1106,7 +1131,6 @@ mod test {
             o => panic!("Got unexpected parse result: {:?}", o),
         };
         assert_eq!(Some("foo.c"), input.to_str());
-        assert_eq!(Language::C, language);
         assert_map_contains!(outputs, ("obj", PathBuf::from("foo.obj")));
         assert_eq!(preprocessor_args, ovec!["-FIfile", "-imsvc/a/b/c"]);
         assert_eq!(dependency_args, ovec!["/showIncludes"]);
@@ -1119,7 +1143,6 @@ mod test {
         let args = ovec!["-c", "foo.c", "-Zi", "-Fdfoo.pdb", "-Fofoo.obj"];
         let ParsedArguments {
             input,
-            language,
             outputs,
             preprocessor_args,
             msvc_show_includes,
@@ -1130,7 +1153,6 @@ mod test {
             o => panic!("Got unexpected parse result: {:?}", o),
         };
         assert_eq!(Some("foo.c"), input.to_str());
-        assert_eq!(Language::C, language);
         assert_map_contains!(
             outputs,
             ("obj", PathBuf::from("foo.obj")),
@@ -1156,7 +1178,6 @@ mod test {
         ];
         let ParsedArguments {
             input,
-            language,
             outputs,
             preprocessor_args,
             msvc_show_includes,
@@ -1167,7 +1188,6 @@ mod test {
             o => panic!("Got unexpected parse result: {:?}", o),
         };
         assert_eq!(Some("foo.c"), input.to_str());
-        assert_eq!(Language::C, language);
         assert_map_contains!(outputs, ("obj", PathBuf::from("foo.obj")));
         assert_eq!(1, outputs.len());
         assert!(preprocessor_args.is_empty());
@@ -1303,7 +1323,8 @@ mod test {
         let f = TestFixture::new();
         let parsed_args = ParsedArguments {
             input: "foo.c".into(),
-            language: Language::C,
+            #[cfg(feature = "dist-client")]
+            dist_input: "foo.c".into(),
             compilation_flag: "-c".into(),
             depfile: None,
             outputs: vec![("obj", "foo.obj".into())].into_iter().collect(),
@@ -1344,7 +1365,8 @@ mod test {
         let pdb = f.touch("foo.pdb").unwrap();
         let parsed_args = ParsedArguments {
             input: "foo.c".into(),
-            language: Language::C,
+            #[cfg(feature = "dist-client")]
+            dist_input: "foo.c".into(),
             compilation_flag: "/c".into(),
             depfile: None,
             outputs: vec![("obj", "foo.obj".into()), ("pdb", pdb)]

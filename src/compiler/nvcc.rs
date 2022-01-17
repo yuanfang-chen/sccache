@@ -15,7 +15,7 @@
 #![allow(unused_imports, dead_code, unused_variables)]
 
 use crate::compiler::args::*;
-use crate::compiler::c::{CCompilerImpl, CCompilerKind, Language, ParsedArguments};
+use crate::compiler::c::{CCompilerImpl, CCompilerKind, ParsedArguments};
 use crate::compiler::gcc::ArgData::*;
 use crate::compiler::{gcc, write_temp_file, Cacheable, CompileCommand, CompilerArguments};
 use crate::dist;
@@ -40,16 +40,23 @@ impl CCompilerImpl for Nvcc {
     fn kind(&self) -> CCompilerKind {
         CCompilerKind::Nvcc
     }
-    fn plusplus(&self) -> bool {
-        false
-    }
     fn parse_arguments(
         &self,
         arguments: &[OsString],
         cwd: &Path,
         base_dir: Option<&PathBuf>,
+        #[cfg(feature = "dist-client")] _rewrite_includes_only: bool,
     ) -> CompilerArguments<ParsedArguments> {
-        gcc::parse_arguments(arguments, cwd, base_dir, (&gcc::ARGS[..], &ARGS[..]), false)
+        gcc::parse_arguments(
+            arguments,
+            cwd,
+            base_dir,
+            #[cfg(feature = "dist-client")]
+            false,
+            #[cfg(feature = "dist-client")]
+            self.kind(),
+            (&gcc::ARGS[..], &ARGS[..]),
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -61,19 +68,10 @@ impl CCompilerImpl for Nvcc {
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
         may_dist: bool,
-        rewrite_includes_only: bool,
     ) -> Result<process::Output>
     where
         T: CommandCreatorSync,
     {
-        let language = match parsed_args.language {
-            Language::C => "c",
-            Language::Cxx => "c++",
-            Language::ObjectiveC => "objective-c",
-            Language::ObjectiveCxx => "objective-c++",
-            Language::Cuda => "cu",
-        };
-
         let initialize_cmd_and_args = || {
             let mut command = creator.clone().new_command_sync(executable);
             command.args(&parsed_args.preprocessor_args);
@@ -83,7 +81,7 @@ impl CCompilerImpl for Nvcc {
             if parsed_args.compilation_flag == "-dc" {
                 command.arg("-rdc=true");
             }
-            command.arg("-x").arg(language).arg(&parsed_args.input);
+            command.arg(&parsed_args.input);
 
             command
         };
@@ -151,17 +149,8 @@ impl CCompilerImpl for Nvcc {
         parsed_args: &ParsedArguments,
         cwd: &Path,
         env_vars: &[(OsString, OsString)],
-        rewrite_includes_only: bool,
     ) -> Result<(CompileCommand, Option<dist::CompileCommand>, Cacheable)> {
-        gcc::generate_compile_commands(
-            path_transformer,
-            executable,
-            parsed_args,
-            cwd,
-            env_vars,
-            self.kind(),
-            rewrite_includes_only,
-        )
+        gcc::generate_compile_commands(path_transformer, executable, parsed_args, cwd, env_vars)
     }
 }
 
@@ -217,7 +206,13 @@ mod test {
 
     fn parse_arguments_(arguments: Vec<String>) -> CompilerArguments<ParsedArguments> {
         let arguments = arguments.iter().map(OsString::from).collect::<Vec<_>>();
-        Nvcc.parse_arguments(&arguments, ".".as_ref(), None)
+        Nvcc.parse_arguments(
+            &arguments,
+            ".".as_ref(),
+            None,
+            #[cfg(feature = "dist-client")]
+            false,
+        )
     }
 
     macro_rules! parses {
@@ -233,7 +228,6 @@ mod test {
     fn test_parse_arguments_simple_c() {
         let a = parses!("-c", "foo.c", "-o", "foo.o");
         assert_eq!(Some("foo.c"), a.input.to_str());
-        assert_eq!(Language::C, a.language);
         assert_map_contains!(a.outputs, ("obj", PathBuf::from("foo.o")));
         assert!(a.preprocessor_args.is_empty());
         assert!(a.common_args.is_empty());
@@ -243,7 +237,6 @@ mod test {
     fn test_parse_arguments_simple_cu() {
         let a = parses!("-c", "foo.cu", "-o", "foo.o");
         assert_eq!(Some("foo.cu"), a.input.to_str());
-        assert_eq!(Language::Cuda, a.language);
         assert_map_contains!(a.outputs, ("obj", PathBuf::from("foo.o")));
         assert!(a.preprocessor_args.is_empty());
         assert!(a.common_args.is_empty());
@@ -253,20 +246,49 @@ mod test {
     fn test_parse_arguments_simple_c_as_cu() {
         let a = parses!("-x", "cu", "-c", "foo.c", "-o", "foo.o");
         assert_eq!(Some("foo.c"), a.input.to_str());
-        assert_eq!(Language::Cuda, a.language);
         assert_map_contains!(a.outputs, ("obj", PathBuf::from("foo.o")));
+        #[cfg(not(feature = "dist-client"))]
         assert!(a.preprocessor_args.is_empty());
-        assert!(a.common_args.is_empty());
+        #[cfg(not(feature = "dist-client"))]
+        assert_eq!("-c", a.compilation_flag);
+        #[cfg(not(feature = "dist-client"))]
+        assert_eq!(ovec!["-x=cu"], a.common_args);
     }
 
     #[test]
     fn test_parse_arguments_dc_compile_flag() {
         let a = parses!("-x", "cu", "-dc", "foo.c", "-o", "foo.o");
         assert_eq!(Some("foo.c"), a.input.to_str());
-        assert_eq!(Language::Cuda, a.language);
-        assert_eq!(Some("-dc"), a.compilation_flag.to_str());
         assert_map_contains!(a.outputs, ("obj", PathBuf::from("foo.o")));
+        #[cfg(not(feature = "dist-client"))]
         assert!(a.preprocessor_args.is_empty());
+        #[cfg(not(feature = "dist-client"))]
+        assert_eq!(Some("-dc"), a.compilation_flag.to_str());
+        #[cfg(not(feature = "dist-client"))]
+        assert_eq!(ovec!["-x=cu"], a.common_args);
+    }
+
+    #[test]
+    #[cfg(feature = "dist-client")]
+    fn test_parse_arguments_remote_no_rewrite_includes_dash_x() {
+        let a = parses!("-nostdinc", "-x", "cu", "-c", "foo.c", "-o", "foo.o");
+        assert_eq!(Some("foo.c"), a.input.to_str());
+        assert_eq!(Some("foo.c"), a.dist_input.to_str());
+        assert_map_contains!(a.outputs, ("obj", PathBuf::from("foo.o")));
+        assert_eq!(ovec!["-nostdinc"], a.preprocessor_args);
+        assert_eq!(Some("-c"), a.compilation_flag.to_str());
+        assert_eq!(ovec!["-x=cu"], a.common_args);
+    }
+
+    #[test]
+    #[cfg(feature = "dist-client")]
+    fn test_parse_arguments_remote_no_rewrite_includes_file_extension() {
+        let a = parses!("-nostdinc", "-c", "foo.cu", "-o", "foo.o");
+        assert_eq!(Some("foo.cu"), a.input.to_str());
+        assert_eq!(Some("foo.cu"), a.dist_input.to_str());
+        assert_map_contains!(a.outputs, ("obj", PathBuf::from("foo.o")));
+        assert_eq!(ovec!["-nostdinc"], a.preprocessor_args);
+        assert_eq!(Some("-c"), a.compilation_flag.to_str());
         assert!(a.common_args.is_empty());
     }
 
@@ -285,7 +307,6 @@ mod test {
             "-isystem=/system/include/file"
         );
         assert_eq!(Some("foo.cpp"), a.input.to_str());
-        assert_eq!(Language::Cxx, a.language);
         assert_map_contains!(a.outputs, ("obj", PathBuf::from("foo.o")));
         assert_eq!(
             ovec![
@@ -308,14 +329,15 @@ mod test {
             "foo.o"
         );
         assert_eq!(Some("foo.c"), a.input.to_str());
-        assert_eq!(Language::Cuda, a.language);
-        assert_eq!(Some("-c"), a.compilation_flag.to_str());
         assert_map_contains!(a.outputs, ("obj", PathBuf::from("foo.o")));
         assert_eq!(
             ovec!["-MD", "-MF", "foo.o.d", "-MT", "foo.o"],
             a.dependency_args
         );
-        assert_eq!(ovec!["-fabc"], a.common_args);
+        #[cfg(not(feature = "dist-client"))]
+        assert_eq!(Some("-c"), a.compilation_flag.to_str());
+        #[cfg(not(feature = "dist-client"))]
+        assert_eq!(ovec!["-x=cu", "-fabc"], a.common_args);
     }
 
     #[test]
@@ -330,11 +352,12 @@ mod test {
             "foo.o"
         );
         assert_eq!(Some("foo.c"), a.input.to_str());
-        assert_eq!(Language::Cuda, a.language);
         assert_map_contains!(a.outputs, ("obj", PathBuf::from("foo.o")));
+        #[cfg(not(feature = "dist-client"))]
         assert!(a.preprocessor_args.is_empty());
+        #[cfg(not(feature = "dist-client"))]
         assert_eq!(
-            ovec!["--generate-code", "arch=compute_61,code=sm_61"],
+            ovec!["-x=cu", "--generate-code", "arch=compute_61,code=sm_61"],
             a.common_args
         );
     }
@@ -357,11 +380,13 @@ mod test {
             "foo.o"
         );
         assert_eq!(Some("foo.c"), a.input.to_str());
-        assert_eq!(Language::Cuda, a.language);
         assert_map_contains!(a.outputs, ("obj", PathBuf::from("foo.o")));
+        #[cfg(not(feature = "dist-client"))]
         assert!(a.preprocessor_args.is_empty());
+        #[cfg(not(feature = "dist-client"))]
         assert_eq!(
             ovec![
+                "-x=cu",
                 "--generate-code",
                 "arch=compute_60,code=[sm_60,sm_61]",
                 "-Xnvlink",
@@ -394,11 +419,13 @@ mod test {
             "foo.o"
         );
         assert_eq!(Some("foo.c"), a.input.to_str());
-        assert_eq!(Language::Cuda, a.language);
         assert_map_contains!(a.outputs, ("obj", PathBuf::from("foo.o")));
+        #[cfg(not(feature = "dist-client"))]
         assert_eq!(ovec!["--expt-relaxed-constexpr"], a.preprocessor_args);
+        #[cfg(not(feature = "dist-client"))]
         assert_eq!(
             ovec![
+                "-x=cu",
                 "-forward-unknown-to-host-compiler",
                 "-Xcompiler",
                 "-pthread",

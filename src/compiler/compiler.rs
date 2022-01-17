@@ -128,6 +128,7 @@ where
         arguments: &[OsString],
         cwd: &Path,
         base_dir: Option<&PathBuf>,
+        #[cfg(feature = "dist-client")] rewrite_includes_only: bool,
     ) -> CompilerArguments<Box<dyn CompilerHasher<T> + 'static>>;
     fn box_clone(&self) -> Box<dyn Compiler<T>>;
 }
@@ -181,7 +182,6 @@ where
         env_vars: Vec<(OsString, OsString)>,
         may_dist: bool,
         pool: &tokio::runtime::Handle,
-        rewrite_includes_only: bool,
     ) -> Result<HashResult>;
 
     /// Return the state of any `--color` option passed to the compiler.
@@ -205,19 +205,8 @@ where
         debug!("[{}]: get_cached_or_compile: {:?}", out_pretty, arguments);
         let start = Instant::now();
         let may_dist = dist_client.is_some();
-        let rewrite_includes_only = match dist_client {
-            Some(ref client) => client.rewrite_includes_only(),
-            _ => false,
-        };
         let result = self
-            .generate_hash_key(
-                &creator,
-                cwd.clone(),
-                env_vars,
-                may_dist,
-                &pool,
-                rewrite_includes_only,
-            )
+            .generate_hash_key(&creator, cwd.clone(), env_vars, may_dist, &pool)
             .await;
         debug!(
             "[{}]: generate_hash_key took {}",
@@ -410,7 +399,7 @@ where
 {
     let mut path_transformer = dist::PathTransformer::default();
     let (compile_cmd, _dist_compile_cmd, cacheable) = compilation
-        .generate_compile_commands(&mut path_transformer, true)
+        .generate_compile_commands(&mut path_transformer)
         .context("Failed to generate compile commands")?;
 
     debug!("[{}]: Compiling locally", out_pretty);
@@ -434,13 +423,9 @@ where
 {
     use std::io;
 
-    let rewrite_includes_only = match dist_client {
-        Some(ref client) => client.rewrite_includes_only(),
-        _ => false,
-    };
     let mut path_transformer = dist::PathTransformer::default();
     let (compile_cmd, dist_compile_cmd, cacheable) = compilation
-        .generate_compile_commands(&mut path_transformer, rewrite_includes_only)
+        .generate_compile_commands(&mut path_transformer)
         .context("Failed to generate compile commands")?;
 
     let dist_client = match dist_client {
@@ -517,6 +502,7 @@ where
                 need_toolchain: false,
             } => Ok(job_alloc),
             dist::AllocJobResult::Fail { msg } => {
+                debug!("Failed to allocate job");
                 Err(anyhow!("Failed to allocate job").context(msg))
             }
         }?;
@@ -641,7 +627,6 @@ pub trait Compilation: Send {
     fn generate_compile_commands(
         &self,
         path_transformer: &mut dist::PathTransformer,
-        rewrite_includes_only: bool,
     ) -> Result<(CompileCommand, Option<dist::CompileCommand>, Cacheable)>;
 
     /// Create a function that will create the inputs used to perform a distributed compilation
@@ -1017,12 +1002,8 @@ nvcc
 msvc
 #elif defined(_MSC_VER) && defined(_MT)
 msvc-clang
-#elif defined(__clang__) && defined(__cplusplus)
-clang++
 #elif defined(__clang__)
 clang
-#elif defined(__GNUC__) && defined(__cplusplus)
-g++
 #elif defined(__GNUC__)
 gcc
 #elif defined(__DCC__)
@@ -1095,17 +1076,11 @@ __VERSION__
         };
 
         match kind {
-            "clang" | "clang++" => {
+            "clang" => {
                 debug!("Found {}", kind);
-                return CCompiler::new(
-                    Clang {
-                        clangplusplus: kind == "clang++",
-                    },
-                    executable,
-                    executable_digest,
-                )
-                .await
-                .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
+                return CCompiler::new(Clang, executable, executable_digest)
+                    .await
+                    .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
             }
             "diab" => {
                 debug!("Found diab");
@@ -1113,17 +1088,11 @@ __VERSION__
                     .await
                     .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
             }
-            "gcc" | "g++" => {
+            "gcc" => {
                 debug!("Found {}", kind);
-                return CCompiler::new(
-                    Gcc {
-                        gplusplus: kind == "g++",
-                    },
-                    executable,
-                    executable_digest,
-                )
-                .await
-                .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
+                return CCompiler::new(Gcc, executable, executable_digest)
+                    .await
+                    .map(|c| Box::new(c) as Box<dyn Compiler<T>>);
             }
             "msvc" | "msvc-clang" => {
                 let is_clang = kind == "msvc-clang";
@@ -1385,12 +1354,18 @@ LLVM version: 6.0",
                 &creator,
                 Ok(MockChild::new(exit_status(0), "preprocessor output", "")),
             );
-            let hasher = match c.parse_arguments(&arguments, ".".as_ref(), None) {
+            let hasher = match c.parse_arguments(
+                &arguments,
+                ".".as_ref(),
+                None,
+                #[cfg(feature = "dist-client")]
+                false,
+            ) {
                 CompilerArguments::Ok(h) => h,
                 o => panic!("Bad result from parse_arguments: {:?}", o),
             };
             hasher
-                .generate_hash_key(&creator, cwd.to_path_buf(), vec![], false, pool, false)
+                .generate_hash_key(&creator, cwd.to_path_buf(), vec![], false, pool)
                 .wait()
                 .unwrap()
                 .key
@@ -1532,7 +1507,13 @@ LLVM version: 6.0",
         });
         let cwd = f.tempdir.path();
         let arguments = ovec!["-c", "foo.c", "-o", "foo.o"];
-        let hasher = match c.parse_arguments(&arguments, ".".as_ref(), None) {
+        let hasher = match c.parse_arguments(
+            &arguments,
+            ".".as_ref(),
+            None,
+            #[cfg(feature = "dist-client")]
+            false,
+        ) {
             CompilerArguments::Ok(h) => h,
             o => panic!("Bad result from parse_arguments: {:?}", o),
         };
@@ -1637,7 +1618,13 @@ LLVM version: 6.0",
         ));
         let cwd = f.tempdir.path();
         let arguments = ovec!["-c", "foo.c", "-o", "foo.o"];
-        let hasher = match c.parse_arguments(&arguments, ".".as_ref(), None) {
+        let hasher = match c.parse_arguments(
+            &arguments,
+            ".".as_ref(),
+            None,
+            #[cfg(feature = "dist-client")]
+            false,
+        ) {
             CompilerArguments::Ok(h) => h,
             o => panic!("Bad result from parse_arguments: {:?}", o),
         };
@@ -1748,7 +1735,13 @@ LLVM version: 6.0",
         });
         let cwd = f.tempdir.path();
         let arguments = ovec!["-c", "foo.c", "-o", "foo.o"];
-        let hasher = match c.parse_arguments(&arguments, ".".as_ref(), None) {
+        let hasher = match c.parse_arguments(
+            &arguments,
+            ".".as_ref(),
+            None,
+            #[cfg(feature = "dist-client")]
+            false,
+        ) {
             CompilerArguments::Ok(h) => h,
             o => panic!("Bad result from parse_arguments: {:?}", o),
         };
@@ -1829,7 +1822,13 @@ LLVM version: 6.0",
         }
         let cwd = f.tempdir.path();
         let arguments = ovec!["-c", "foo.c", "-o", "foo.o"];
-        let hasher = match c.parse_arguments(&arguments, ".".as_ref(), None) {
+        let hasher = match c.parse_arguments(
+            &arguments,
+            ".".as_ref(),
+            None,
+            #[cfg(feature = "dist-client")]
+            false,
+        ) {
             CompilerArguments::Ok(h) => h,
             o => panic!("Bad result from parse_arguments: {:?}", o),
         };
@@ -1934,7 +1933,13 @@ LLVM version: 6.0",
         );
         let cwd = f.tempdir.path();
         let arguments = ovec!["-c", "foo.c", "-o", "foo.o"];
-        let hasher = match c.parse_arguments(&arguments, ".".as_ref(), None) {
+        let hasher = match c.parse_arguments(
+            &arguments,
+            ".".as_ref(),
+            None,
+            #[cfg(feature = "dist-client")]
+            false,
+        ) {
             CompilerArguments::Ok(h) => h,
             o => panic!("Bad result from parse_arguments: {:?}", o),
         };
@@ -2018,7 +2023,13 @@ LLVM version: 6.0",
         }
         let cwd = f.tempdir.path();
         let arguments = ovec!["-c", "foo.c", "-o", "foo.o"];
-        let hasher = match c.parse_arguments(&arguments, ".".as_ref(), None) {
+        let hasher = match c.parse_arguments(
+            &arguments,
+            ".".as_ref(),
+            None,
+            #[cfg(feature = "dist-client")]
+            false,
+        ) {
             CompilerArguments::Ok(h) => h,
             o => panic!("Bad result from parse_arguments: {:?}", o),
         };

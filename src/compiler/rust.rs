@@ -477,6 +477,7 @@ where
         arguments: &[OsString],
         cwd: &Path,
         _base_dir: Option<&PathBuf>,
+        #[cfg(feature = "dist-client")] _rewrite_includes_only: bool,
     ) -> CompilerArguments<Box<dyn CompilerHasher<T> + 'static>> {
         match parse_arguments(arguments, cwd) {
             CompilerArguments::Ok(args) => CompilerArguments::Ok(Box::new(RustHasher {
@@ -1254,7 +1255,6 @@ where
         env_vars: Vec<(OsString, OsString)>,
         _may_dist: bool,
         pool: &tokio::runtime::Handle,
-        _rewrite_includes_only: bool,
     ) -> Result<HashResult> {
         let RustHasher {
             executable,
@@ -1544,7 +1544,6 @@ impl Compilation for RustCompilation {
     fn generate_compile_commands(
         &self,
         path_transformer: &mut dist::PathTransformer,
-        _rewrite_includes_only: bool,
     ) -> Result<(CompileCommand, Option<dist::CompileCommand>, Cacheable)> {
         let RustCompilation {
             ref executable,
@@ -3011,7 +3010,6 @@ c:/foo/bar.rs:
                 .to_vec(),
                 false,
                 &pool,
-                false,
             )
             .wait()
             .unwrap();
@@ -3100,7 +3098,6 @@ c:/foo/bar.rs:
                 env_vars.to_owned(),
                 false,
                 &pool,
-                false,
             )
             .wait()
             .unwrap()
