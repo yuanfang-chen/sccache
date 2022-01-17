@@ -169,7 +169,7 @@ counted_array!(pub static ARGS: [ArgInfo<gcc::ArgData>; _] = [
     //todo: refactor show_includes into dependency_args
 
     take_arg!("--archive-options options", OsString, CanBeSeparated('='), PassThrough),
-    take_arg!("--compiler-options", OsString, CanBeSeparated('='), PreprocessorArgument),
+    take_arg!("--compiler-options", OsString, CanBeSeparated('='), PassThrough),
     flag!("--expt-extended-lambda", PreprocessorArgumentFlag),
     flag!("--expt-relaxed-constexpr", PreprocessorArgumentFlag),
     flag!("--extended-lambda", PreprocessorArgumentFlag),
@@ -186,7 +186,7 @@ counted_array!(pub static ARGS: [ArgInfo<gcc::ArgData>; _] = [
     take_arg!("--system-include", PathBuf, CanBeSeparated('='), PreprocessorArgumentPath),
 
     take_arg!("-Xarchive", OsString, CanBeSeparated('='), PassThrough),
-    take_arg!("-Xcompiler", OsString, CanBeSeparated('='), PreprocessorArgument),
+    take_arg!("-Xcompiler", OsString, CanBeSeparated('='), PassThrough),
     take_arg!("-Xlinker", OsString, CanBeSeparated('='), PassThrough),
     take_arg!("-Xnvlink", OsString, CanBeSeparated('='), PassThrough),
     take_arg!("-Xptxas", OsString, CanBeSeparated('='), PassThrough),
@@ -359,23 +359,19 @@ mod test {
         assert_eq!(Some("foo.c"), a.input.to_str());
         assert_eq!(Language::Cuda, a.language);
         assert_map_contains!(a.outputs, ("obj", PathBuf::from("foo.o")));
-        assert_eq!(
-            ovec![
-                "-Xcompiler",
-                "-fPIC,-fno-common",
-                "-Xcompiler",
-                "-fvisibility=hidden",
-                "-Xcompiler",
-                "-Wall,-Wno-unknown-pragmas,-Wno-unused-local-typedefs"
-            ],
-            a.preprocessor_args
-        );
+        assert!(a.preprocessor_args.is_empty());
         assert_eq!(
             ovec![
                 "--generate-code",
                 "arch=compute_60,code=[sm_60,sm_61]",
                 "-Xnvlink",
                 "--suppress-stack-size-warning",
+                "-Xcompiler",
+                "-fPIC,-fno-common",
+                "-Xcompiler",
+                "-fvisibility=hidden",
+                "-Xcompiler",
+                "-Wall,-Wno-unknown-pragmas,-Wno-unused-local-typedefs",
                 "-Xcudafe",
                 "--display_error_number"
             ],
@@ -400,12 +396,14 @@ mod test {
         assert_eq!(Some("foo.c"), a.input.to_str());
         assert_eq!(Language::Cuda, a.language);
         assert_map_contains!(a.outputs, ("obj", PathBuf::from("foo.o")));
+        assert_eq!(ovec!["--expt-relaxed-constexpr"], a.preprocessor_args);
         assert_eq!(
-            ovec!["--expt-relaxed-constexpr", "-Xcompiler", "-pthread"],
-            a.preprocessor_args
-        );
-        assert_eq!(
-            ovec!["-forward-unknown-to-host-compiler", "-std=c++14"],
+            ovec![
+                "-forward-unknown-to-host-compiler",
+                "-Xcompiler",
+                "-pthread",
+                "-std=c++14"
+            ],
             a.common_args
         );
     }
