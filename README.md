@@ -1,5 +1,17 @@
 [![Build Status](https://github.com/yuanfang-chen/sccache/workflows/ci/badge.svg)](https://github.com/yuanfang-chen/sccache/actions?query=workflow%3Aci)
 
+Fork of sccache
+==================================
+- support `SCCACHE_BASEDIR`
+- make compiler check like `CCACHE_COMPILERCHECK`
+- by default, pass through UnknownFlag arguments with -Xclang
+- [msvc] handle unknown flags like gcc
+- disable IP check in token authentication
+- add a feature "dist-http" to use http instead of https for the server
+- reimplement `rewrite_includes_only`
+- miscellaneous others
+
+
 sccache - Shared Compilation Cache
 ==================================
 
