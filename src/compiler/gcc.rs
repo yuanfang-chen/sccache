@@ -124,7 +124,6 @@ counted_array!(pub static ARGS: [ArgInfo<ArgData>; _] = [
     flag!("--coverage", Coverage),
     take_arg!("--param", OsString, Separated, PassThrough),
     flag!("--save-temps", TooHardFlag),
-    take_arg!("--serialize-diagnostics", PathBuf, Separated, PassThroughPath),
     take_arg!("--sysroot", PathBuf, Separated, PassThroughPath),
     take_arg!("-A", OsString, Separated, PassThrough),
     take_arg!("-B", PathBuf, CanBeSeparated, PassThroughPath),
