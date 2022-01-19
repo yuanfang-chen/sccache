@@ -858,7 +858,6 @@ mod test {
             compilation_flag,
             outputs,
             preprocessor_args,
-            msvc_show_includes,
             common_args,
             ..
         } = match parse_arguments_(args) {
@@ -870,7 +869,6 @@ mod test {
         assert_map_contains!(outputs, ("obj", PathBuf::from("foo.o")));
         assert!(preprocessor_args.is_empty());
         assert!(common_args.is_empty());
-        assert!(!msvc_show_includes);
     }
 
     #[test]
@@ -880,7 +878,6 @@ mod test {
             input,
             outputs,
             preprocessor_args,
-            msvc_show_includes,
             common_args,
             ..
         } = match parse_arguments_(args) {
@@ -891,7 +888,6 @@ mod test {
         assert_map_contains!(outputs, ("obj", PathBuf::from("foo.o")));
         assert!(preprocessor_args.is_empty());
         assert!(common_args.is_empty());
-        assert!(!msvc_show_includes);
     }
 
     #[test]
@@ -911,7 +907,6 @@ mod test {
             input,
             outputs,
             preprocessor_args,
-            msvc_show_includes,
             common_args,
             ..
         } = match parse_arguments_(args) {
@@ -926,7 +921,6 @@ mod test {
         );
         assert!(preprocessor_args.is_empty());
         assert_eq!(ovec!["-gsplit-dwarf"], common_args);
-        assert!(!msvc_show_includes);
     }
 
     #[test]
@@ -948,7 +942,6 @@ mod test {
             input,
             outputs,
             preprocessor_args,
-            msvc_show_includes,
             common_args,
             ..
         } = match parse_arguments_(args) {
@@ -959,7 +952,6 @@ mod test {
         assert_map_contains!(outputs, ("obj", PathBuf::from("foo.o")));
         assert!(preprocessor_args.is_empty());
         assert_eq!(3, common_args.len());
-        assert!(!msvc_show_includes);
     }
 
     #[test]
@@ -969,7 +961,6 @@ mod test {
             input,
             outputs,
             preprocessor_args,
-            msvc_show_includes,
             common_args,
             profile_generate,
             ..
@@ -985,7 +976,6 @@ mod test {
         );
         assert!(preprocessor_args.is_empty());
         assert_eq!(ovec!["--coverage"], common_args);
-        assert!(!msvc_show_includes);
         assert!(profile_generate);
     }
 
@@ -996,7 +986,6 @@ mod test {
             input,
             outputs,
             preprocessor_args,
-            msvc_show_includes,
             common_args,
             profile_generate,
             ..
@@ -1012,7 +1001,6 @@ mod test {
         );
         assert!(preprocessor_args.is_empty());
         assert_eq!(ovec!["-ftest-coverage"], common_args);
-        assert!(!msvc_show_includes);
         assert!(profile_generate);
     }
 
@@ -1023,7 +1011,6 @@ mod test {
             input,
             outputs,
             preprocessor_args,
-            msvc_show_includes,
             common_args,
             profile_generate,
             ..
@@ -1035,7 +1022,6 @@ mod test {
         assert_map_contains!(outputs, ("obj", PathBuf::from("foo.o")));
         assert!(preprocessor_args.is_empty());
         assert_eq!(ovec!["-fprofile-generate"], common_args);
-        assert!(!msvc_show_includes);
         assert!(profile_generate);
     }
 
@@ -1046,7 +1032,6 @@ mod test {
             input,
             outputs,
             preprocessor_args,
-            msvc_show_includes,
             common_args,
             ..
         } = match parse_arguments_(args) {
@@ -1057,7 +1042,6 @@ mod test {
         assert_map_contains!(outputs, ("obj", PathBuf::from("foo.o")));
         assert!(preprocessor_args.is_empty());
         assert_eq!(ovec!["-fabc", "-mxyz"], common_args);
-        assert!(!msvc_show_includes);
     }
 
     #[test]
@@ -1069,7 +1053,6 @@ mod test {
             input,
             outputs,
             preprocessor_args,
-            msvc_show_includes,
             common_args,
             ..
         } = match parse_arguments_(args) {
@@ -1080,7 +1063,6 @@ mod test {
         assert_map_contains!(outputs, ("obj", PathBuf::from("foo.o")));
         assert_eq!(ovec!["-Iinclude", "-include", "file"], preprocessor_args);
         assert_eq!(ovec!["-fabc"], common_args);
-        assert!(!msvc_show_includes);
     }
 
     #[test]
@@ -1104,7 +1086,6 @@ mod test {
             outputs,
             dependency_args,
             preprocessor_args,
-            msvc_show_includes,
             common_args,
             ..
         } = match parse_arguments_(args) {
@@ -1119,7 +1100,6 @@ mod test {
             preprocessor_args
         );
         assert_eq!(ovec!["-fabc"], common_args);
-        assert!(!msvc_show_includes);
     }
 
     #[test]
@@ -1130,7 +1110,6 @@ mod test {
             input,
             outputs,
             dependency_args,
-            msvc_show_includes,
             common_args,
             ..
         } = match parse_arguments_(args) {
@@ -1141,7 +1120,6 @@ mod test {
         assert_map_contains!(outputs, ("obj", PathBuf::from("foo.o")));
         assert_eq!(ovec!["-MF", "file"], dependency_args);
         assert_eq!(ovec!["-fabc"], common_args);
-        assert!(!msvc_show_includes);
     }
 
     #[test]
@@ -1154,7 +1132,6 @@ mod test {
             outputs,
             dependency_args,
             preprocessor_args,
-            msvc_show_includes,
             common_args,
             ..
         } = match parse_arguments_(args) {
@@ -1169,7 +1146,6 @@ mod test {
         );
         assert!(preprocessor_args.is_empty());
         assert_eq!(ovec!["-fabc"], common_args);
-        assert!(!msvc_show_includes);
     }
 
     #[test]
@@ -1182,7 +1158,6 @@ mod test {
             outputs,
             dependency_args,
             preprocessor_args,
-            msvc_show_includes,
             common_args,
             ..
         } = match parse_arguments_(args) {
@@ -1197,7 +1172,6 @@ mod test {
         );
         assert!(preprocessor_args.is_empty());
         assert_eq!(ovec!["-fabc"], common_args);
-        assert!(!msvc_show_includes);
     }
 
     #[test]
@@ -1235,7 +1209,6 @@ mod test {
             input,
             outputs,
             dependency_args,
-            msvc_show_includes,
             common_args,
             ..
         } = match parse_arguments_(args) {
@@ -1246,7 +1219,6 @@ mod test {
         assert_map_contains!(outputs, ("obj", PathBuf::from("foo.o")));
         assert_eq!(ovec!["-MF", "file", "-MD", "-MT", "foo.o"], dependency_args);
         assert_eq!(ovec!["-fabc"], common_args);
-        assert!(!msvc_show_includes);
     }
 
     #[test]
@@ -1349,7 +1321,6 @@ mod test {
             input,
             outputs,
             preprocessor_args,
-            msvc_show_includes,
             common_args,
             ..
         } = match parse_arguments_(vec![arg]) {
@@ -1360,7 +1331,6 @@ mod test {
         assert_map_contains!(outputs, ("obj", PathBuf::from("foo.o")));
         assert!(preprocessor_args.is_empty());
         assert!(common_args.is_empty());
-        assert!(!msvc_show_includes);
     }
 
     #[test]
