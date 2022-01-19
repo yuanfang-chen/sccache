@@ -662,6 +662,7 @@ lazy_static! {
         "SCCACHE_C_CUSTOM_CACHE_BUSTER",
         "MACOSX_DEPLOYMENT_TARGET",
         "IPHONEOS_DEPLOYMENT_TARGET",
+        "CCC_OVERRIDE_OPTIONS",
     ].iter().map(OsStr::new).collect();
 }
 
@@ -685,9 +686,11 @@ pub fn hash_key(
     m.update(CACHE_VERSION);
     m.update(language.as_str().as_bytes());
     for arg in arguments {
+        trace!("hash: {:?}", &arg);
         arg.hash(&mut HashToDigest { digest: &mut m });
     }
     for hash in extra_hashes {
+        trace!("hash: {:?}", &hash);
         m.update(hash.as_bytes());
     }
 
