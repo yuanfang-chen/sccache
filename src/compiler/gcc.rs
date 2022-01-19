@@ -648,13 +648,6 @@ where
     })
 }
 
-fn get_obj_dir<'a>(parsed_args: &'a ParsedArguments, cwd: &'a Path) -> &'a Path {
-    match parsed_args.outputs.get("obj") {
-        Some(p) if p.components().count() > 1 => p.parent().unwrap(),
-        _ => cwd,
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 pub async fn preprocess<T>(
     creator: &T,
@@ -683,7 +676,7 @@ where
         .args(&parsed_args.common_args)
         .env_clear()
         .envs(env_vars.iter().map(|&(ref k, ref v)| (k, v)))
-        .current_dir(get_obj_dir(parsed_args, cwd));
+        .current_dir(cwd);
 
     if log_enabled!(Trace) {
         trace!("preprocess: {:?}", cmd);
@@ -1368,36 +1361,6 @@ mod test {
         assert!(preprocessor_args.is_empty());
         assert!(common_args.is_empty());
         assert!(!msvc_show_includes);
-    }
-
-    #[test]
-    fn test_get_obj_dir() {
-        let f = TestFixture::new();
-        let mut parsed_args = ParsedArguments {
-            input: "foo.c".into(),
-            #[cfg(feature = "dist-client")]
-            dist_input: "foo.i".into(),
-            compilation_flag: "-c".into(),
-            depfile: None,
-            outputs: vec![("obj", "foo.o".into())].into_iter().collect(),
-            dependency_args: vec![],
-            preprocessor_args: vec![],
-            common_args: vec![],
-            extra_hash_files: vec![],
-            msvc_show_includes: false,
-            profile_generate: false,
-            color_mode: ColorMode::Auto,
-        };
-        assert_eq!(
-            get_obj_dir(&parsed_args, f.tempdir.path()),
-            f.tempdir.path()
-        );
-
-        assert!(parsed_args
-            .outputs
-            .insert("obj", "a/foo.o".into())
-            .is_some());
-        assert_eq!(get_obj_dir(&parsed_args, f.tempdir.path()), Path::new("a"));
     }
 
     #[test]
