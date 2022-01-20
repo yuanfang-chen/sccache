@@ -10,6 +10,7 @@ Fork of sccache
 - add a feature "dist-http" to use http instead of https for the server
 - reimplement `rewrite_includes_only`
 - miscellaneous others
+- the release builds of this repo has the feature "dist-http" enabled.
 
 
 sccache - Shared Compilation Cache
