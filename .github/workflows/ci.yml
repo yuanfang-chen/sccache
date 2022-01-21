@@ -259,6 +259,12 @@ jobs:
       - name: Create release assets
         run: |
           for d in sccache-*; do
+            if [ -f "$d/sccache" ]; then
+              chmod +x $d/sccache
+            fi
+            if [ -f "$d/sccache-dist" ]; then
+              chmod +x $d/sccache-dist
+            fi
             cp README.md LICENSE $d/
             tar -zcvf $d.tar.gz $d
             echo -n $(shasum -ba 256 $d.tar.gz | cut -d " " -f 1) > $d.tar.gz.sha256
