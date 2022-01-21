@@ -295,6 +295,7 @@ msvc_args!(static ARGS: [ArgInfo<ArgData>; _] = [
     msvc_flag!("c", DoCompilation),
     msvc_take_arg!("clang:", OsString, Concatenated, Clang),
     msvc_take_arg!("deps", PathBuf, Concatenated, DepFile),
+    msvc_take_arg!("diasdkdir", PathBuf, CanBeSeparated, PreprocessorArgumentPath),
     msvc_take_arg!("doc", PathBuf, Concatenated, TooHardPath), // Creates an .xdc file.
     msvc_flag!("experimental:module", TooHardFlag),
     msvc_take_arg!("external:I", PathBuf, CanBeSeparated, ExternalIncludePath),
@@ -304,6 +305,11 @@ msvc_args!(static ARGS: [ArgInfo<ArgData>; _] = [
     msvc_take_arg!("o", PathBuf, Separated, Output), // Deprecated but valid
     msvc_flag!("showIncludes", ShowIncludes),
     msvc_flag!("u", PreprocessorArgumentFlag),
+    msvc_take_arg!("vctoolsdir", PathBuf, CanBeSeparated, PreprocessorArgumentPath),
+    msvc_take_arg!("vctoolsversion", OsString, CanBeSeparated, PreprocessorArgument),
+    msvc_take_arg!("winsdkdir", PathBuf, CanBeSeparated, PreprocessorArgumentPath),
+    msvc_take_arg!("winsdkversion", OsString, CanBeSeparated, PreprocessorArgument),
+    msvc_take_arg!("winsysroot", PathBuf, CanBeSeparated, PreprocessorArgumentPath),
     take_arg!("@", PathBuf, Concatenated, TooHardPath),
 ]);
 
@@ -1254,6 +1260,52 @@ mod test {
                 "-Fmdictionary-map"
             )
         );
+    }
+
+    #[test]
+    fn test_parse_arguments_win_sysroot() {
+        let args = ovec![
+            "-c",
+            "foo.c",
+            "-Fofoo.obj",
+            "-diasdkdir",
+            "/d",
+            "-vctoolsdir",
+            "/v",
+            "-vctoolsversion",
+            "14.29.30133",
+            "-winsdkdir",
+            "/w",
+            "-winsdkversion",
+            "10.0.19041.0",
+            "-winsysroot",
+            "/sys"
+        ];
+        let ParsedArguments {
+            input,
+            outputs,
+            preprocessor_args,
+            common_args,
+            ..
+        } = match parse_arguments(args) {
+            CompilerArguments::Ok(args) => args,
+            o => panic!("Got unexpected parse result: {:?}", o),
+        };
+        assert_eq!(Some("foo.c"), input.to_str());
+        assert_map_contains!(outputs, ("obj", PathBuf::from("foo.obj")));
+        assert_eq!(1, outputs.len());
+        assert_eq!(
+            preprocessor_args,
+            ovec![
+                "-diasdkdir/d",
+                "-vctoolsdir/v",
+                "-vctoolsversion14.29.30133",
+                "-winsdkdir/w",
+                "-winsdkversion10.0.19041.0",
+                "-winsysroot/sys"
+            ]
+        );
+        assert!(common_args.is_empty());
     }
 
     #[test]
