@@ -660,7 +660,10 @@ pub fn run_command(cmd: Command) -> Result<i32> {
         Command::PackageToolchain(executable, out) => {
             use crate::compiler;
 
-            trace!("Command::PackageToolchain({})", executable.display());
+            trace!(
+                "Command::PackageToolchain({})",
+                executable.to_string_lossy()
+            );
             let runtime = Runtime::new()?;
             let jobserver = unsafe { Client::new() };
             let creator = ProcessCommandCreator::new(&jobserver);
@@ -670,10 +673,20 @@ pub fn run_command(cmd: Command) -> Result<i32> {
 
             let pool = runtime.handle().clone();
             runtime.block_on(async move {
-                compiler::get_compiler_info(creator, &executable, &cwd, &env, &pool, None)
-                    .await
-                    .map(|compiler| compiler.0.get_toolchain_packager())
-                    .and_then(|packager| packager.write_pkg(out_file))
+                compiler::get_compiler_info(
+                    creator,
+                    &Compile {
+                        exe: executable,
+                        cwd: cwd.into(),
+                        args: Vec::new(),
+                        env_vars: env,
+                    },
+                    &pool,
+                    None,
+                )
+                .await
+                .map(|compiler| compiler.0.get_toolchain_packager())
+                .and_then(|packager| packager.write_pkg(out_file))
             })?
         }
         #[cfg(not(feature = "dist-client"))]

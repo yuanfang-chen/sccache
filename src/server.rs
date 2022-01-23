@@ -858,33 +858,26 @@ where
     /// the inital information and an optional body which will eventually
     /// contain the results of the compilation.
     async fn handle_compile(&self, compile: Compile) -> Result<SccacheResponse> {
-        let exe = compile.exe;
-        let cmd = compile.args;
-        let cwd: PathBuf = compile.cwd.into();
-        let env_vars = compile.env_vars;
-        let me = self.clone();
-
-        let info = self.compiler_info(exe.into(), cwd.clone(), &env_vars).await;
-        Ok(me.check_compiler(info, cmd, cwd, env_vars).await)
+        let info = self.compiler_info(&compile).await;
+        Ok(self
+            .clone()
+            .check_compiler(info, compile.args, compile.cwd.into(), compile.env_vars)
+            .await)
     }
 
     /// Look up compiler info from the cache for the compiler `path`.
     /// If not cached, determine the compiler type and cache the result.
-    async fn compiler_info(
-        &self,
-        path: PathBuf,
-        cwd: PathBuf,
-        env: &[(OsString, OsString)],
-    ) -> Result<Box<dyn Compiler<C>>> {
+    async fn compiler_info(&self, compile: &Compile) -> Result<Box<dyn Compiler<C>>> {
         trace!("compiler_info");
+
+        let path: PathBuf = compile.exe.clone().into();
+        let path2: PathBuf = compile.exe.clone().into();
+        let cwd: PathBuf = compile.cwd.clone().into();
+        let env = compile.env_vars.to_vec();
 
         let me = self.clone();
         let me1 = self.clone();
         // lookup if compiler proxy exists for the current compiler path
-
-        let path2 = path.clone();
-        let path1 = path.clone();
-        let env = env.to_vec();
 
         let resolved_with_proxy = {
             let compiler_proxies_borrow = self.compiler_proxies.read().await;
@@ -963,9 +956,7 @@ where
                 // `path` (or its clone `path1`) to resolve using that one, not using `resolved_compiler_path`
                 let info = get_compiler_info::<C>(
                     me.creator.clone(),
-                    &path1,
-                    &cwd,
-                    env.as_slice(),
+                    compile,
                     &me.rt,
                     dist_info.clone().map(|(p, _)| p),
                 )

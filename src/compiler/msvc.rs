@@ -19,7 +19,7 @@ use crate::compiler::{
 };
 use crate::dist;
 use crate::mock_command::{CommandCreatorSync, RunCommand};
-use crate::util::run_input_output;
+use crate::util::{ref_env, run_input_output};
 use local_encoding::{Encoder, Encoding};
 use log::Level::Debug;
 use std::collections::{HashMap, HashSet};
@@ -110,7 +110,7 @@ pub async fn detect_showincludes_prefix<T>(
     creator: &T,
     exe: &OsStr,
     is_clang: bool,
-    env: Vec<(OsString, OsString)>,
+    env: &[(OsString, OsString)],
     pool: &tokio::runtime::Handle,
 ) -> Result<String>
 where
@@ -146,10 +146,9 @@ where
         // The MSDN docs say the -showIncludes output goes to stderr,
         // but that's not true unless running with -E.
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    for (k, v) in env {
-        cmd.env(k, v);
-    }
+        .stderr(Stdio::null())
+        .envs(ref_env(env));
+
     trace!("detect_showincludes_prefix: {:?}", cmd);
 
     let output = run_input_output(cmd, None).await?;
@@ -902,7 +901,7 @@ mod test {
         );
         assert_eq!(
             "blah: ",
-            detect_showincludes_prefix(&creator, "cl.exe".as_ref(), false, Vec::new(), &pool)
+            detect_showincludes_prefix(&creator, "cl.exe".as_ref(), false, &Vec::new(), &pool)
                 .wait()
                 .unwrap()
         );

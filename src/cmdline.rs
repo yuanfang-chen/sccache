@@ -45,7 +45,7 @@ pub enum Command {
     /// Perform a login to authenticate for distributed compilation.
     DistAuth,
     /// Package a toolchain for distributed compilation (executable, out)
-    PackageToolchain(PathBuf, PathBuf),
+    PackageToolchain(OsString, PathBuf),
     /// Run a compiler command.
     Compile {
         /// The binary to execute.
