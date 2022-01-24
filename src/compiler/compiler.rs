@@ -1030,7 +1030,23 @@ __VERSION__
         .stderr(Stdio::piped())
         .envs(ref_env(&compile.env_vars));
 
-    cmd.arg("-E").arg(src);
+    // Handle `gcc -B` since it decides compiler version.
+    let mut cmd_args = vec!["-E"];
+    if compile.exe.to_str().unwrap().contains("gcc")
+        || compile.exe.to_str().unwrap().contains("g++")
+    {
+        if let Some(index) = compile
+            .args
+            .iter()
+            .position(|x| x.to_string_lossy().starts_with("-B"))
+        {
+            cmd_args.push(compile.args[index].to_str().unwrap());
+            if compile.args[index] == "-B" && index + 1 < compile.args.len() {
+                cmd_args.push(compile.args[index + 1].to_str().unwrap());
+            }
+        }
+    }
+    cmd.args(&cmd_args).arg(src);
     trace!("compiler {:?}", cmd);
     let child = cmd.spawn().await?;
     let output = child
@@ -1193,6 +1209,79 @@ mod test {
             .unwrap()
             .0;
         assert_eq!(CompilerKind::C(CCompilerKind::Gcc), c.kind());
+    }
+
+    #[test]
+    fn test_detect_compiler_kind_gcc_dash_b() {
+        let f = TestFixture::new();
+        let creator = new_creator();
+        let runtime = single_threaded_runtime();
+        let pool = runtime.handle();
+        next_command_with_args(
+            &creator,
+            Ok(MockChild::new(exit_status(0), "\n\ngcc", "")),
+            |args| assert_eq!(ovec!["-E", "-B/a"].as_slice(), &args[..2]),
+        );
+
+        let c = detect_compiler(
+            creator.clone(),
+            &Compile {
+                exe: OsString::from(f.mk_bin("xgcc").unwrap()),
+                cwd: OsString::from(f.tempdir.path()),
+                args: ovec!["-any", "-B/a", "-c", "foo.c"],
+                env_vars: Vec::new(),
+            },
+            pool,
+            None,
+        )
+        .wait()
+        .unwrap()
+        .0;
+        assert_eq!(CompilerKind::C(CCompilerKind::Gcc), c.kind());
+
+        next_command_with_args(
+            &creator,
+            Ok(MockChild::new(exit_status(0), "\n\ngcc", "")),
+            |args| assert!(args.iter().all(|x| !x.to_string_lossy().starts_with("-B"))),
+        );
+
+        let c = detect_compiler(
+            creator.clone(),
+            &Compile {
+                exe: OsString::from(f.mk_bin("gcc").unwrap()),
+                cwd: OsString::from(f.tempdir.path()),
+                args: ovec!["-c", "foo.c"],
+                env_vars: Vec::new(),
+            },
+            pool,
+            None,
+        )
+        .wait()
+        .unwrap()
+        .0;
+        assert_eq!(CompilerKind::C(CCompilerKind::Gcc), c.kind());
+
+        next_command_with_args(
+            &creator,
+            Ok(MockChild::new(exit_status(0), "\n\nclang", "")),
+            |args| assert!(args.iter().all(|x| !x.to_string_lossy().starts_with("-B"))),
+        );
+
+        let c = detect_compiler(
+            creator,
+            &Compile {
+                exe: OsString::from(f.mk_bin("clang").unwrap()),
+                cwd: OsString::from(f.tempdir.path()),
+                args: ovec!["-B/a", "-c", "foo.c"],
+                env_vars: Vec::new(),
+            },
+            pool,
+            None,
+        )
+        .wait()
+        .unwrap()
+        .0;
+        assert_eq!(CompilerKind::C(CCompilerKind::Clang), c.kind());
     }
 
     #[test]

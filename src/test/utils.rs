@@ -90,6 +90,19 @@ pub fn next_command(creator: &Arc<Mutex<MockCommandCreator>>, child: Result<Mock
     creator.lock().unwrap().next_command_spawns(child);
 }
 
+pub fn next_command_with_args<C>(
+    creator: &Arc<Mutex<MockCommandCreator>>,
+    child: Result<MockChild>,
+    check_args: C,
+) where
+    C: Fn(&[OsString]) + Send + 'static,
+{
+    creator
+        .lock()
+        .unwrap()
+        .next_command_with_args_spawns(child, check_args);
+}
+
 pub fn next_command_calls<C: Fn(&[OsString]) -> Result<MockChild> + Send + 'static>(
     creator: &Arc<Mutex<MockCommandCreator>>,
     call: C,
