@@ -434,10 +434,16 @@ impl fmt::Debug for ChildOrCall {
 
 /// A mocked command that simply returns its `child` from `spawn`.
 #[allow(dead_code)]
-#[derive(Debug)]
 pub struct MockCommand {
     pub child: Option<ChildOrCall>,
     pub args: Vec<OsString>,
+    pub check_args: Option<Box<dyn Fn(&[OsString]) + Send>>,
+}
+
+impl fmt::Debug for MockCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "child: {:?}\nargs{:?}", self.child, self.args)
+    }
 }
 
 #[async_trait]
@@ -487,6 +493,9 @@ impl RunCommand for MockCommand {
         self
     }
     async fn spawn(&mut self) -> Result<MockChild> {
+        if let Some(f) = &self.check_args {
+            f(&self.args)
+        }
         match self.child.take().unwrap() {
             ChildOrCall::Child(c) => c,
             ChildOrCall::Call(f) => f(&self.args),
@@ -499,6 +508,7 @@ impl RunCommand for MockCommand {
 pub struct MockCommandCreator {
     /// Data to be used as the return value of `MockCommand::spawn`.
     pub children: Vec<ChildOrCall>,
+    pub check_args: Vec<Option<Box<dyn Fn(&[OsString]) + Send>>>,
 }
 
 impl MockCommandCreator {
@@ -506,6 +516,16 @@ impl MockCommandCreator {
     #[allow(dead_code)]
     pub fn next_command_spawns(&mut self, child: Result<MockChild>) {
         self.children.push(ChildOrCall::Child(child));
+        self.check_args.push(None);
+    }
+
+    #[allow(dead_code)]
+    pub fn next_command_with_args_spawns<C>(&mut self, child: Result<MockChild>, check_args: C)
+    where
+        C: Fn(&[OsString]) + Send + 'static,
+    {
+        self.children.push(ChildOrCall::Child(child));
+        self.check_args.push(Some(Box::new(check_args)));
     }
 
     /// The next `MockCommand` created will call `call` with the command-line
@@ -516,6 +536,7 @@ impl MockCommandCreator {
         C: Fn(&[OsString]) -> Result<MockChild> + Send + 'static,
     {
         self.children.push(ChildOrCall::Call(Box::new(call)));
+        self.check_args.push(None);
     }
 }
 
@@ -525,6 +546,7 @@ impl CommandCreator for MockCommandCreator {
     fn new(_client: &Client) -> MockCommandCreator {
         MockCommandCreator {
             children: Vec::new(),
+            check_args: Vec::new(),
         }
     }
 
@@ -534,6 +556,7 @@ impl CommandCreator for MockCommandCreator {
         MockCommand {
             child: Some(self.children.remove(0)),
             args: vec![],
+            check_args: self.check_args.remove(0),
         }
     }
 }
@@ -637,6 +660,22 @@ mod test {
         assert_eq!(0, output.status.code().unwrap());
         assert_eq!(b"hello".to_vec(), output.stdout);
         assert_eq!(b"error".to_vec(), output.stderr);
+    }
+
+    #[test]
+    fn test_mock_command_args_output() {
+        let client = Client::new_num(1);
+        let mut creator = MockCommandCreator::new(&client);
+        creator.next_command_with_args_spawns(
+            Ok(MockChild::new(exit_status(0), "hello", "error")),
+            |args| assert_eq!("-B/a", args[0]),
+        );
+        creator
+            .new_command("foo")
+            .arg("-B/a")
+            .spawn()
+            .wait()
+            .unwrap();
     }
 
     #[test]
