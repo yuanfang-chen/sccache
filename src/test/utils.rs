@@ -19,6 +19,7 @@ use std::ffi::OsString;
 use std::fs::{self, File};
 use std::future::Future;
 use std::io;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use std::sync::{Arc, Mutex};
@@ -154,7 +155,11 @@ where
 }
 
 pub fn touch(dir: &Path, path: &str) -> io::Result<PathBuf> {
-    create_file(dir, path, |_f| Ok(()))
+    create_file(dir, path, |mut f| {
+        // Write empty string to change mtime.
+        f.write_all("".as_bytes())?;
+        Ok(())
+    })
 }
 
 #[cfg(unix)]
@@ -240,6 +245,15 @@ impl TestFixture {
     #[allow(dead_code)]
     pub fn mk_bin(&self, path: &str) -> io::Result<PathBuf> {
         mk_bin(self.tempdir.path(), path)
+    }
+
+    #[allow(dead_code)]
+    pub fn mk_bin_contents<F: FnOnce(File) -> io::Result<()>>(
+        &self,
+        path: &str,
+        contents: F,
+    ) -> io::Result<PathBuf> {
+        mk_bin_contents(self.tempdir.path(), path, contents)
     }
 }
 
