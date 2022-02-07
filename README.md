@@ -3,7 +3,8 @@
 Fork of sccache
 ==================================
 - support `SCCACHE_BASEDIR`
-- make compiler check like `CCACHE_COMPILERCHECK`
+- support `SCCACHE_COMPILERTYPE`
+- support `SCCACHE_COMPILERCHECK`
 - by default, pass through UnknownFlag arguments with -Xclang
 - [msvc] handle unknown flags like gcc
 - disable IP check in token authentication
@@ -27,6 +28,7 @@ sccache also provides [icecream](https://github.com/icecc/icecream)-style distri
 Table of Contents (ToC)
 ======================
 
+- [Fork of sccache](#fork-of-sccache)
 - [sccache - Shared Compilation Cache](#sccache---shared-compilation-cache)
 - [Table of Contents (ToC)](#table-of-contents-toc)
   - [Installation](#installation)
@@ -48,6 +50,7 @@ Table of Contents (ToC)
     - [Google Cloud Storage](#google-cloud-storage)
     - [Azure](#azure)
   - [Separating caches between invocations](#separating-caches-between-invocations)
+  - [Compiler type and compiler check](#compiler-type-and-compiler-check)
   - [Overwriting the cache](#overwriting-the-cache)
   - [Debugging](#debugging)
   - [Interaction with GNU `make` jobserver](#interaction-with-gnu-make-jobserver)
@@ -105,7 +108,7 @@ over `SCCACHE_CONF`.
 ```
 [cache]
 # Could be override by SCCACHE_DIR
-disk.dir = "/home/ychen2/Data/.sccache"
+disk.dir = "/must/be/absolute/path"
 # Could be override by SCCACHE_CACHE_SIZE
 # 50gb
 disk.size = 53687091200
@@ -162,8 +165,6 @@ elseif(CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
   string(REPLACE "/Zi" "/Z7" CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_RELWITHDEBINFO}")
 endif()
 ```
-
-talk about clang-cl
 
 ---
 
@@ -263,6 +264,27 @@ that'll be mixed into the hash.
 `MACOSX_DEPLOYMENT_TARGET` and `IPHONEOS_DEPLOYMENT_TARGET` variables
 already exhibit such reuse-suppression behaviour.
 There are currently no such variables for compiling Rust.
+
+---
+
+Compiler type and compiler check
+---------------------
+
+`SCCACHE_COMPILERTYPE`: "gcc", "clang", "diab", "msvc", "clang-cl", "nvcc", "auto"
+
+Default to "auto".
+
+"auto" will run the compiler to check its type.
+
+`SCCACHE_COMPILERCHECK`: "content", "mtime", "version", "none", "string:\<value\>"
+
+Default to "mtime".
+
+"version" will run the compiler preprocessing stage to get the compiler version.
+
+"string:\<value\>" is a user-specified compiler version to avoid invoking the compiler.
+
+"none" skips the compiler check.
 
 ---
 
